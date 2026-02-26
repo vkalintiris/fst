@@ -297,7 +297,8 @@ impl Fst<Vec<u8>> {
         K: AsRef<[u8]>,
         I: IntoIterator<Item = K>,
     {
-        let mut builder = Builder::memory();
+        let bump = bumpalo::Bump::new();
+        let mut builder = Builder::memory(&bump);
         for k in iter {
             builder.add(k)?;
         }
@@ -319,7 +320,8 @@ impl Fst<Vec<u8>> {
         K: AsRef<[u8]>,
         I: IntoIterator<Item = (K, u64)>,
     {
-        let mut builder = Builder::memory();
+        let bump = bumpalo::Bump::new();
+        let mut builder = Builder::memory(&bump);
         for (k, v) in iter {
             builder.insert(k, v)?;
         }

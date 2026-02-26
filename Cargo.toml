@@ -26,6 +26,7 @@ levenshtein = ["utf8-ranges"]
 fst = { path = "." }
 
 [dependencies]
+bumpalo = { version = "3", features = ["collections"] }
 utf8-ranges = { version = "1.0.4", optional = true }
 
 [dev-dependencies]
@@ -34,6 +35,7 @@ fnv = "1.0.6"
 memmap2 = "0.5.10"
 quickcheck = { version = "0.9.2", default-features = false }
 rand = "0.7.3"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 debug = true

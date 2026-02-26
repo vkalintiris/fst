@@ -44,7 +44,8 @@ impl Set<Vec<u8>> {
         T: AsRef<[u8]>,
         I: IntoIterator<Item = T>,
     {
-        let mut builder = SetBuilder::memory();
+        let bump = bumpalo::Bump::new();
+        let mut builder = SetBuilder::memory(&bump);
         builder.extend_iter(iter)?;
         Set::new(builder.into_inner()?)
     }
@@ -494,7 +495,8 @@ impl<D: AsRef<[u8]>> From<raw::Fst<D>> for Set<D> {
 /// ```rust
 /// use fst::{IntoStreamer, Streamer, Set, SetBuilder};
 ///
-/// let mut build = SetBuilder::memory();
+/// let bump = bumpalo::Bump::new();
+/// let mut build = SetBuilder::memory(&bump);
 /// build.insert("bruce").unwrap();
 /// build.insert("clarence").unwrap();
 /// build.insert("stevie").unwrap();
@@ -525,8 +527,9 @@ impl<D: AsRef<[u8]>> From<raw::Fst<D>> for Set<D> {
 ///
 /// use fst::{IntoStreamer, Streamer, Set, SetBuilder};
 ///
+/// let bump = bumpalo::Bump::new();
 /// let mut wtr = io::BufWriter::new(File::create("set.fst").unwrap());
-/// let mut build = SetBuilder::new(wtr).unwrap();
+/// let mut build = SetBuilder::new(wtr, &bump).unwrap();
 /// build.insert("bruce").unwrap();
 /// build.insert("clarence").unwrap();
 /// build.insert("stevie").unwrap();
@@ -548,13 +551,13 @@ impl<D: AsRef<[u8]>> From<raw::Fst<D>> for Set<D> {
 ///     "bruce".as_bytes(), "clarence".as_bytes(), "stevie".as_bytes(),
 /// ]);
 /// ```
-pub struct SetBuilder<W>(raw::Builder<W>);
+pub struct SetBuilder<'bump, W>(raw::Builder<'bump, W>);
 
-impl SetBuilder<Vec<u8>> {
+impl<'bump> SetBuilder<'bump, Vec<u8>> {
     /// Create a builder that builds a set in memory.
     #[inline]
-    pub fn memory() -> SetBuilder<Vec<u8>> {
-        SetBuilder(raw::Builder::memory())
+    pub fn memory(bump: &'bump bumpalo::Bump) -> SetBuilder<'bump, Vec<u8>> {
+        SetBuilder(raw::Builder::memory(bump))
     }
 
     /// Finishes the construction of the set and returns it.
@@ -564,11 +567,11 @@ impl SetBuilder<Vec<u8>> {
     }
 }
 
-impl<W: io::Write> SetBuilder<W> {
+impl<'bump, W: io::Write> SetBuilder<'bump, W> {
     /// Create a builder that builds a set by writing it to `wtr` in a
     /// streaming fashion.
-    pub fn new(wtr: W) -> Result<SetBuilder<W>> {
-        raw::Builder::new_type(wtr, 0).map(SetBuilder)
+    pub fn new(wtr: W, bump: &'bump bumpalo::Bump) -> Result<SetBuilder<'bump, W>> {
+        raw::Builder::new_type(wtr, 0, bump).map(SetBuilder)
     }
 
     /// Insert a new key into the set.

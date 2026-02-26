@@ -35,8 +35,9 @@ impl Args {
             );
         }
 
+        let bump = bumpalo::Bump::new();
         let wtr = util::get_buf_writer(Some(&self.output))?;
-        let mut merged = fst::SetBuilder::new(wtr)?;
+        let mut merged = fst::SetBuilder::new(wtr, &bump)?;
 
         let mut sets = vec![];
         for set_path in &self.input {

@@ -102,8 +102,9 @@ where
 
         // Nothing? Create an empty FST and be done with it.
         if results.is_empty() {
+            let bump = bumpalo::Bump::new();
             let wtr = io::BufWriter::new(File::create(&self.output)?);
-            let builder = raw::Builder::new(wtr)?;
+            let builder = raw::Builder::new(wtr, &bump)?;
             builder.finish()?;
             return Ok(());
         }
@@ -223,10 +224,11 @@ impl Batchable for KvBatch {
     fn create_fst(&mut self) -> Result<PathBuf, Error> {
         self.kvs.sort();
         self.kvs.dedup();
+        let bump = bumpalo::Bump::new();
         let file_name = format!("batch{}", self.index);
         let path = self.tmp_dir.join(file_name).to_path_buf();
         let wtr = io::BufWriter::new(File::create(&path)?);
-        let mut builder = raw::Builder::new(wtr)?;
+        let mut builder = raw::Builder::new(wtr, &bump)?;
         for &(ref k, v) in &self.kvs {
             match builder.insert(k, v) {
                 Ok(_) => {}
@@ -251,10 +253,11 @@ struct UnionBatch {
 
 impl Batchable for UnionBatch {
     fn create_fst(&mut self) -> Result<PathBuf, Error> {
+        let bump = bumpalo::Bump::new();
         let file_name = format!("union-gen{}-batch{}", self.gen, self.index);
         let path = self.tmp_dir.join(file_name).to_path_buf();
         let wtr = io::BufWriter::new(File::create(&path)?);
-        let mut builder = raw::Builder::new(wtr)?;
+        let mut builder = raw::Builder::new(wtr, &bump)?;
 
         let mut fsts = vec![];
         for path in &self.fsts {

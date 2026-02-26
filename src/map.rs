@@ -69,7 +69,8 @@ impl Map<Vec<u8>> {
         K: AsRef<[u8]>,
         I: IntoIterator<Item = (K, u64)>,
     {
-        let mut builder = MapBuilder::memory();
+        let bump = bumpalo::Bump::new();
+        let mut builder = MapBuilder::memory(&bump);
         builder.extend_iter(iter)?;
         Map::new(builder.into_inner()?)
     }
@@ -548,7 +549,8 @@ impl<'m, 'a, D: AsRef<[u8]>> IntoStreamer<'a> for &'m Map<D> {
 /// ```rust
 /// use fst::{IntoStreamer, Streamer, Map, MapBuilder};
 ///
-/// let mut build = MapBuilder::memory();
+/// let bump = bumpalo::Bump::new();
+/// let mut build = MapBuilder::memory(&bump);
 /// build.insert("bruce", 1).unwrap();
 /// build.insert("clarence", 2).unwrap();
 /// build.insert("stevie", 3).unwrap();
@@ -581,8 +583,9 @@ impl<'m, 'a, D: AsRef<[u8]>> IntoStreamer<'a> for &'m Map<D> {
 ///
 /// use fst::{IntoStreamer, Streamer, Map, MapBuilder};
 ///
+/// let bump = bumpalo::Bump::new();
 /// let mut wtr = io::BufWriter::new(File::create("map.fst").unwrap());
-/// let mut build = MapBuilder::new(wtr).unwrap();
+/// let mut build = MapBuilder::new(wtr, &bump).unwrap();
 /// build.insert("bruce", 1).unwrap();
 /// build.insert("clarence", 2).unwrap();
 /// build.insert("stevie", 3).unwrap();
@@ -606,13 +609,13 @@ impl<'m, 'a, D: AsRef<[u8]>> IntoStreamer<'a> for &'m Map<D> {
 ///     (b"stevie".to_vec(), 3),
 /// ]);
 /// ```
-pub struct MapBuilder<W>(raw::Builder<W>);
+pub struct MapBuilder<'bump, W>(raw::Builder<'bump, W>);
 
-impl MapBuilder<Vec<u8>> {
+impl<'bump> MapBuilder<'bump, Vec<u8>> {
     /// Create a builder that builds a map in memory.
     #[inline]
-    pub fn memory() -> MapBuilder<Vec<u8>> {
-        MapBuilder(raw::Builder::memory())
+    pub fn memory(bump: &'bump bumpalo::Bump) -> MapBuilder<'bump, Vec<u8>> {
+        MapBuilder(raw::Builder::memory(bump))
     }
 
     /// Finishes the construction of the map and returns it.
@@ -622,11 +625,11 @@ impl MapBuilder<Vec<u8>> {
     }
 }
 
-impl<W: io::Write> MapBuilder<W> {
+impl<'bump, W: io::Write> MapBuilder<'bump, W> {
     /// Create a builder that builds a map by writing it to `wtr` in a
     /// streaming fashion.
-    pub fn new(wtr: W) -> Result<MapBuilder<W>> {
-        raw::Builder::new_type(wtr, 0).map(MapBuilder)
+    pub fn new(wtr: W, bump: &'bump bumpalo::Bump) -> Result<MapBuilder<'bump, W>> {
+        raw::Builder::new_type(wtr, 0, bump).map(MapBuilder)
     }
 
     /// Insert a new key-value pair into the map.

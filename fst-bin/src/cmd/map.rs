@@ -62,8 +62,9 @@ impl Args {
     }
 
     fn run_sorted(&self) -> Result<(), Error> {
+        let bump = bumpalo::Bump::new();
         let wtr = util::get_buf_writer(Some(&self.output))?;
-        let mut map = MapBuilder::new(wtr)?;
+        let mut map = MapBuilder::new(wtr, &bump)?;
         for input in &self.input {
             let mut rdr = csv::ReaderBuilder::new()
                 .has_headers(false)

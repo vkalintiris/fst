@@ -1,39 +1,52 @@
+use bumpalo::collections::Vec as BumpVec;
+use bumpalo::Bump;
+
 use crate::raw::build::BuilderNode;
 use crate::raw::{CompiledAddr, NONE_ADDRESS};
 
 #[derive(Debug)]
-pub struct Registry {
-    table: Vec<RegistryCell>,
+pub struct Registry<'bump> {
+    table: BumpVec<'bump, RegistryCell<'bump>>,
     table_size: usize, // number of rows
     mru_size: usize,   // number of columns
 }
 
 #[derive(Debug)]
-struct RegistryCache<'a> {
-    cells: &'a mut [RegistryCell],
-}
-
-#[derive(Clone, Debug)]
-pub struct RegistryCell {
-    addr: CompiledAddr,
-    node: BuilderNode,
+struct RegistryCache<'bump, 'a> {
+    cells: &'a mut [RegistryCell<'bump>],
 }
 
 #[derive(Debug)]
-pub enum RegistryEntry<'a> {
+pub struct RegistryCell<'bump> {
+    addr: CompiledAddr,
+    node: BuilderNode<'bump>,
+}
+
+#[derive(Debug)]
+pub enum RegistryEntry<'bump, 'a> {
     Found(CompiledAddr),
-    NotFound(&'a mut RegistryCell),
+    NotFound(&'a mut RegistryCell<'bump>),
     Rejected,
 }
 
-impl Registry {
-    pub fn new(table_size: usize, mru_size: usize) -> Registry {
-        let empty_cell = RegistryCell::none();
+impl<'bump> Registry<'bump> {
+    pub fn new(
+        table_size: usize,
+        mru_size: usize,
+        bump: &'bump Bump,
+    ) -> Registry<'bump> {
         let ncells = table_size.checked_mul(mru_size).unwrap();
-        Registry { table: vec![empty_cell; ncells], table_size, mru_size }
+        let mut table = BumpVec::with_capacity_in(ncells, bump);
+        for _ in 0..ncells {
+            table.push(RegistryCell::none(bump));
+        }
+        Registry { table, table_size, mru_size }
     }
 
-    pub fn entry<'a>(&'a mut self, node: &BuilderNode) -> RegistryEntry<'a> {
+    pub fn entry<'a>(
+        &'a mut self,
+        node: &BuilderNode<'_>,
+    ) -> RegistryEntry<'bump, 'a> {
         if self.table.is_empty() {
             return RegistryEntry::Rejected;
         }
@@ -43,7 +56,7 @@ impl Registry {
         RegistryCache { cells: &mut self.table[start..end] }.entry(node)
     }
 
-    fn hash(&self, node: &BuilderNode) -> usize {
+    fn hash(&self, node: &BuilderNode<'_>) -> usize {
         // Basic FNV-1a hash as described:
         // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
         //
@@ -62,8 +75,11 @@ impl Registry {
     }
 }
 
-impl<'a> RegistryCache<'a> {
-    fn entry(mut self, node: &BuilderNode) -> RegistryEntry<'a> {
+impl<'bump, 'a> RegistryCache<'bump, 'a> {
+    fn entry(
+        mut self,
+        node: &BuilderNode<'_>,
+    ) -> RegistryEntry<'bump, 'a> {
         if self.cells.len() == 1 {
             let cell = &mut self.cells[0];
             if !cell.is_none() && &cell.node == node {
@@ -89,7 +105,8 @@ impl<'a> RegistryCache<'a> {
             self.cells.swap(0, 1);
             RegistryEntry::NotFound(&mut self.cells[0])
         } else {
-            let find = |c: &RegistryCell| !c.is_none() && &c.node == node;
+            let find =
+                |c: &RegistryCell<'bump>| !c.is_none() && &c.node == node;
             if let Some(i) = self.cells.iter().position(find) {
                 let addr = self.cells[i].addr;
                 self.promote(i); // most recently used
@@ -112,9 +129,9 @@ impl<'a> RegistryCache<'a> {
     }
 }
 
-impl RegistryCell {
-    fn none() -> RegistryCell {
-        RegistryCell { addr: NONE_ADDRESS, node: BuilderNode::default() }
+impl<'bump> RegistryCell<'bump> {
+    fn none(bump: &'bump Bump) -> RegistryCell<'bump> {
+        RegistryCell { addr: NONE_ADDRESS, node: BuilderNode::new(bump) }
     }
 
     fn is_none(&self) -> bool {
@@ -128,25 +145,30 @@ impl RegistryCell {
 
 #[cfg(test)]
 mod tests {
+    use bumpalo::Bump;
+
     use super::{Registry, RegistryCache, RegistryCell, RegistryEntry};
     use crate::raw::build::BuilderNode;
     use crate::raw::{Output, Transition};
 
-    fn assert_rejected(entry: RegistryEntry) {
+    fn assert_rejected(entry: RegistryEntry<'_, '_>) {
         match entry {
             RegistryEntry::Rejected => {}
             entry => panic!("expected rejected entry, got: {:?}", entry),
         }
     }
 
-    fn assert_not_found(entry: RegistryEntry) {
+    fn assert_not_found(entry: RegistryEntry<'_, '_>) {
         match entry {
             RegistryEntry::NotFound(_) => {}
             entry => panic!("expected nout found entry, got: {:?}", entry),
         }
     }
 
-    fn assert_insert_and_found(reg: &mut Registry, bnode: &BuilderNode) {
+    fn assert_insert_and_found(
+        reg: &mut Registry<'_>,
+        bnode: &BuilderNode<'_>,
+    ) {
         match reg.entry(&bnode) {
             RegistryEntry::NotFound(cell) => cell.insert(1234),
             entry => panic!("unexpected not found entry, got: {:?}", entry),
@@ -157,84 +179,90 @@ mod tests {
         }
     }
 
+    fn bnode_new<'bump>(
+        bump: &'bump Bump,
+        is_final: bool,
+        final_output: Output,
+        trans: &[Transition],
+    ) -> BuilderNode<'bump> {
+        let mut node = BuilderNode::new(bump);
+        node.is_final = is_final;
+        node.final_output = final_output;
+        node.trans.extend_from_slice(trans);
+        node
+    }
+
     #[test]
     fn empty_is_ok() {
-        let mut reg = Registry::new(0, 0);
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: vec![],
-        };
+        let bump = Bump::new();
+        let mut reg = Registry::new(0, 0, &bump);
+        let bnode = bnode_new(&bump, false, Output::zero(), &[]);
         assert_rejected(reg.entry(&bnode));
     }
 
     #[test]
     fn one_final_is_ok() {
-        let mut reg = Registry::new(1, 1);
-        let bnode = BuilderNode {
-            is_final: true,
-            final_output: Output::zero(),
-            trans: vec![],
-        };
+        let bump = Bump::new();
+        let mut reg = Registry::new(1, 1, &bump);
+        let bnode = bnode_new(&bump, true, Output::zero(), &[]);
         assert_insert_and_found(&mut reg, &bnode);
     }
 
     #[test]
     fn one_with_trans_is_ok() {
-        let mut reg = Registry::new(1, 1);
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: vec![Transition {
-                addr: 0,
-                inp: b'a',
-                out: Output::zero(),
-            }],
-        };
-        assert_insert_and_found(&mut reg, &bnode);
-        assert_not_found(
-            reg.entry(&BuilderNode { is_final: true, ..bnode.clone() }),
+        let bump = Bump::new();
+        let mut reg = Registry::new(1, 1, &bump);
+        let bnode = bnode_new(
+            &bump,
+            false,
+            Output::zero(),
+            &[Transition { addr: 0, inp: b'a', out: Output::zero() }],
         );
-        assert_not_found(reg.entry(&BuilderNode {
-            trans: vec![Transition {
-                addr: 0,
-                inp: b'b',
-                out: Output::zero(),
-            }],
-            ..bnode.clone()
-        }));
-        assert_not_found(reg.entry(&BuilderNode {
-            trans: vec![Transition {
-                addr: 0,
-                inp: b'a',
-                out: Output::new(1),
-            }],
-            ..bnode.clone()
-        }));
+        assert_insert_and_found(&mut reg, &bnode);
+        assert_not_found(reg.entry(&bnode_new(
+            &bump,
+            true,
+            Output::zero(),
+            &[Transition { addr: 0, inp: b'a', out: Output::zero() }],
+        )));
+        assert_not_found(reg.entry(&bnode_new(
+            &bump,
+            false,
+            Output::zero(),
+            &[Transition { addr: 0, inp: b'b', out: Output::zero() }],
+        )));
+        assert_not_found(reg.entry(&bnode_new(
+            &bump,
+            false,
+            Output::zero(),
+            &[Transition { addr: 0, inp: b'a', out: Output::new(1) }],
+        )));
     }
 
     #[test]
     fn cache_works() {
-        let mut reg = Registry::new(1, 1);
+        let bump = Bump::new();
+        let mut reg = Registry::new(1, 1, &bump);
 
-        let bnode1 = BuilderNode { is_final: true, ..BuilderNode::default() };
+        let bnode1 = bnode_new(&bump, true, Output::zero(), &[]);
         assert_insert_and_found(&mut reg, &bnode1);
 
-        let bnode2 =
-            BuilderNode { final_output: Output::new(1), ..bnode1.clone() };
+        let bnode2 = bnode_new(&bump, true, Output::new(1), &[]);
         assert_insert_and_found(&mut reg, &bnode2);
         assert_not_found(reg.entry(&bnode1));
     }
 
     #[test]
     fn promote() {
-        let bn = BuilderNode::default();
+        let bump = Bump::new();
+        let bn = BuilderNode::new(&bump);
         let mut bnodes = vec![
-            RegistryCell { addr: 1, node: bn.clone() },
-            RegistryCell { addr: 2, node: bn.clone() },
-            RegistryCell { addr: 3, node: bn.clone() },
-            RegistryCell { addr: 4, node: bn.clone() },
+            RegistryCell { addr: 1, node: bnode_new(&bump, false, Output::zero(), &[]) },
+            RegistryCell { addr: 2, node: bnode_new(&bump, false, Output::zero(), &[]) },
+            RegistryCell { addr: 3, node: bnode_new(&bump, false, Output::zero(), &[]) },
+            RegistryCell { addr: 4, node: bnode_new(&bump, false, Output::zero(), &[]) },
         ];
+        drop(bn);
         let mut cache = RegistryCache { cells: &mut bnodes };
 
         cache.promote(0);

@@ -245,7 +245,7 @@ impl<'f> Node<'f> {
         wtr: W,
         last_addr: CompiledAddr,
         addr: CompiledAddr,
-        node: &BuilderNode,
+        node: &BuilderNode<'_>,
     ) -> io::Result<()> {
         assert!(node.trans.len() <= 256);
         if node.trans.is_empty()
@@ -265,7 +265,7 @@ impl<'f> Node<'f> {
     }
 }
 
-impl BuilderNode {
+impl BuilderNode<'_> {
     pub fn compile_to<W: io::Write>(
         &self,
         wtr: W,
@@ -469,7 +469,7 @@ impl StateAnyTrans {
     fn compile<W: io::Write>(
         mut wtr: W,
         addr: CompiledAddr,
-        node: &BuilderNode,
+        node: &BuilderNode<'_>,
     ) -> io::Result<()> {
         assert!(node.trans.len() <= 256);
 
@@ -876,6 +876,7 @@ fn unpack_delta(
 
 #[cfg(test)]
 mod tests {
+    use bumpalo::Bump;
     use quickcheck::{quickcheck, TestResult};
 
     use crate::raw::build::BuilderNode;
@@ -891,7 +892,8 @@ mod tests {
             bs.sort();
             bs.dedup();
 
-            let mut bfst = Builder::memory();
+            let bump = Bump::new();
+            let mut bfst = Builder::memory(&bump);
             for word in &bs {
                 bfst.add(word).unwrap();
             }
@@ -906,7 +908,7 @@ mod tests {
         quickcheck(p as fn(Vec<Vec<u8>>) -> TestResult)
     }
 
-    fn nodes_equal(compiled: &Node, uncompiled: &BuilderNode) -> bool {
+    fn nodes_equal(compiled: &Node, uncompiled: &BuilderNode<'_>) -> bool {
         println!("{:?}", compiled);
         assert_eq!(compiled.is_final(), uncompiled.is_final);
         assert_eq!(compiled.len(), uncompiled.trans.len());
@@ -921,13 +923,13 @@ mod tests {
         true
     }
 
-    fn compile(node: &BuilderNode) -> (CompiledAddr, Vec<u8>) {
+    fn compile(node: &BuilderNode<'_>) -> (CompiledAddr, Vec<u8>) {
         let mut buf = vec![0; 24];
         node.compile_to(&mut buf, NEVER_LAST, 24).unwrap();
         (buf.len() as CompiledAddr - 1, buf)
     }
 
-    fn roundtrip(bnode: &BuilderNode) -> bool {
+    fn roundtrip(bnode: &BuilderNode<'_>) -> bool {
         let (addr, bytes) = compile(bnode);
         let node = Node::new(VERSION, addr, &bytes);
         nodes_equal(&node, &bnode)
@@ -937,13 +939,23 @@ mod tests {
         Transition { inp, out: Output::zero(), addr }
     }
 
+    fn bnode_new<'bump>(
+        bump: &'bump Bump,
+        is_final: bool,
+        final_output: Output,
+        transitions: &[Transition],
+    ) -> BuilderNode<'bump> {
+        let mut node = BuilderNode::new(bump);
+        node.is_final = is_final;
+        node.final_output = final_output;
+        node.trans.extend_from_slice(transitions);
+        node
+    }
+
     #[test]
     fn bin_no_trans() {
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: vec![],
-        };
+        let bump = Bump::new();
+        let bnode = bnode_new(&bump, false, Output::zero(), &[]);
         let (addr, buf) = compile(&bnode);
         let node = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 3);
@@ -952,11 +964,13 @@ mod tests {
 
     #[test]
     fn bin_one_trans_common() {
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: vec![trans(20, b'a')],
-        };
+        let bump = Bump::new();
+        let bnode = bnode_new(
+            &bump,
+            false,
+            Output::zero(),
+            &[trans(20, b'a')],
+        );
         let (addr, buf) = compile(&bnode);
         let node = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 3);
@@ -965,11 +979,13 @@ mod tests {
 
     #[test]
     fn bin_one_trans_not_common() {
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: vec![trans(2, b'\xff')],
-        };
+        let bump = Bump::new();
+        let bnode = bnode_new(
+            &bump,
+            false,
+            Output::zero(),
+            &[trans(2, b'\xff')],
+        );
         let (addr, buf) = compile(&bnode);
         let node = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 4);
@@ -978,10 +994,12 @@ mod tests {
 
     #[test]
     fn bin_many_trans() {
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: vec![
+        let bump = Bump::new();
+        let bnode = bnode_new(
+            &bump,
+            false,
+            Output::zero(),
+            &[
                 trans(2, b'a'),
                 trans(3, b'b'),
                 trans(4, b'c'),
@@ -989,7 +1007,7 @@ mod tests {
                 trans(6, b'e'),
                 trans(7, b'f'),
             ],
-        };
+        );
         let (addr, buf) = compile(&bnode);
         let node = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 14);
@@ -998,11 +1016,10 @@ mod tests {
 
     #[test]
     fn node_max_trans() {
-        let bnode = BuilderNode {
-            is_final: false,
-            final_output: Output::zero(),
-            trans: (0..256).map(|i| trans(0, i as u8)).collect(),
-        };
+        let bump = Bump::new();
+        let transitions: Vec<Transition> =
+            (0..256).map(|i| trans(0, i as u8)).collect();
+        let bnode = bnode_new(&bump, false, Output::zero(), &transitions);
         let (addr, buf) = compile(&bnode);
         let node = Node::new(VERSION, addr, &buf);
         assert_eq!(node.transitions().count(), 256);

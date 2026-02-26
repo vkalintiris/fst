@@ -58,8 +58,9 @@ impl Args {
     }
 
     fn run_sorted(&self) -> Result<(), Error> {
+        let bump = bumpalo::Bump::new();
         let wtr = util::get_buf_writer(Some(&self.output))?;
-        let mut set = SetBuilder::new(wtr)?;
+        let mut set = SetBuilder::new(wtr, &bump)?;
         for input in &self.input {
             let mut rdr = util::get_buf_reader(Some(input))?;
             rdr.for_byte_line(|line| {

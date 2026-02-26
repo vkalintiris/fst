@@ -107,8 +107,11 @@ use memmap2::Mmap;
 // This is where we'll write our map to.
 let mut wtr = io::BufWriter::new(File::create("map.fst")?);
 
+// Create a bump allocator for the builder's internal allocations.
+let bump = bumpalo::Bump::new();
+
 // Create a builder that can be used to insert new key-value pairs.
-let mut build = MapBuilder::new(wtr)?;
+let mut build = MapBuilder::new(wtr, &bump)?;
 build.insert("bruce", 1).unwrap();
 build.insert("clarence", 2).unwrap();
 build.insert("stevie", 3).unwrap();

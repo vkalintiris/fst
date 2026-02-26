@@ -1,3 +1,5 @@
+use bumpalo::Bump;
+
 use crate::automaton::AlwaysMatch;
 use crate::error::Error;
 use crate::raw::{self, Bound, Builder, Fst, Output, Stream, VERSION};
@@ -10,7 +12,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<[u8]>,
 {
-    let mut bfst = Builder::memory();
+    let bump = Bump::new();
+    let mut bfst = Builder::memory(&bump);
     let mut ss: Vec<Vec<u8>> =
         ss.into_iter().map(|s| s.as_ref().to_vec()).collect();
     ss.sort();
@@ -28,7 +31,8 @@ where
     I: IntoIterator<Item = (S, u64)>,
     S: AsRef<[u8]>,
 {
-    let mut bfst = Builder::memory();
+    let bump = Bump::new();
+    let mut bfst = Builder::memory(&bump);
     let mut ss: Vec<(Vec<u8>, u64)> =
         ss.into_iter().map(|(s, o)| (s.as_ref().to_vec(), o)).collect();
     ss.sort();
@@ -84,7 +88,8 @@ macro_rules! test_set_fail {
         #[test]
         #[should_panic]
         fn $name() {
-            let mut bfst = Builder::memory();
+            let bump = Bump::new();
+            let mut bfst = Builder::memory(&bump);
             $(bfst.add($s).unwrap();)*
         }
     }
@@ -140,7 +145,8 @@ macro_rules! test_map_fail {
         #[test]
         #[should_panic]
         fn $name() {
-            let mut bfst = Builder::memory();
+            let bump = Bump::new();
+            let mut bfst = Builder::memory(&bump);
             $(bfst.insert($s, $o).unwrap();)*
         }
     }
@@ -483,13 +489,15 @@ test_range! {
 
 #[test]
 fn one_vec_multiple_fsts() {
-    let mut bfst1 = Builder::memory();
+    let bump = Bump::new();
+    let mut bfst1 = Builder::memory(&bump);
     bfst1.add(b"bar").unwrap();
     bfst1.add(b"baz").unwrap();
     let bytes = bfst1.into_inner().unwrap();
     let fst1_len = bytes.len();
 
-    let mut bfst2 = Builder::new(bytes).unwrap();
+    let bump2 = Bump::new();
+    let mut bfst2 = Builder::new(bytes, &bump2).unwrap();
     bfst2.add(b"bar").unwrap();
     bfst2.add(b"foo").unwrap();
 
@@ -506,7 +514,8 @@ fn one_vec_multiple_fsts() {
 
 #[test]
 fn bytes_written() {
-    let mut bfst1 = Builder::memory();
+    let bump = Bump::new();
+    let mut bfst1 = Builder::memory(&bump);
     bfst1.add(b"bar").unwrap();
     bfst1.add(b"baz").unwrap();
     let counted_len = bfst1.bytes_written();
@@ -571,7 +580,8 @@ fn verify_ok_empty() {
 
 #[test]
 fn verify_err() {
-    let mut b = Builder::memory();
+    let bump = Bump::new();
+    let mut b = Builder::memory(&bump);
     b.add(b"bar").unwrap();
     b.add(b"baz").unwrap();
     let mut bytes = b.into_inner().unwrap();
