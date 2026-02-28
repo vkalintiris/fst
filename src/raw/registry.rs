@@ -2,39 +2,39 @@ use bumpalo::collections::Vec as BumpVec;
 use bumpalo::Bump;
 
 use crate::raw::build::BuilderNode;
-use crate::raw::{CompiledAddr, NONE_ADDRESS};
+use crate::raw::{CompiledAddr, FstOutput, NONE_ADDRESS};
 
 #[derive(Debug)]
-pub struct Registry<'bump> {
-    table: BumpVec<'bump, RegistryCell<'bump>>,
+pub struct Registry<'bump, V: FstOutput = u64> {
+    table: BumpVec<'bump, RegistryCell<'bump, V>>,
     table_size: usize, // number of rows
     mru_size: usize,   // number of columns
 }
 
 #[derive(Debug)]
-struct RegistryCache<'bump, 'a> {
-    cells: &'a mut [RegistryCell<'bump>],
+struct RegistryCache<'bump, 'a, V: FstOutput = u64> {
+    cells: &'a mut [RegistryCell<'bump, V>],
 }
 
 #[derive(Debug)]
-pub struct RegistryCell<'bump> {
+pub struct RegistryCell<'bump, V: FstOutput = u64> {
     addr: CompiledAddr,
-    node: BuilderNode<'bump>,
+    node: BuilderNode<'bump, V>,
 }
 
 #[derive(Debug)]
-pub enum RegistryEntry<'bump, 'a> {
+pub enum RegistryEntry<'bump, 'a, V: FstOutput = u64> {
     Found(CompiledAddr),
-    NotFound(&'a mut RegistryCell<'bump>),
+    NotFound(&'a mut RegistryCell<'bump, V>),
     Rejected,
 }
 
-impl<'bump> Registry<'bump> {
+impl<'bump, V: FstOutput> Registry<'bump, V> {
     pub fn new(
         table_size: usize,
         mru_size: usize,
         bump: &'bump Bump,
-    ) -> Registry<'bump> {
+    ) -> Registry<'bump, V> {
         let ncells = table_size.checked_mul(mru_size).unwrap();
         let mut table = BumpVec::with_capacity_in(ncells, bump);
         for _ in 0..ncells {
@@ -45,8 +45,8 @@ impl<'bump> Registry<'bump> {
 
     pub fn entry<'a>(
         &'a mut self,
-        node: &BuilderNode<'_>,
-    ) -> RegistryEntry<'bump, 'a> {
+        node: &BuilderNode<'_, V>,
+    ) -> RegistryEntry<'bump, 'a, V> {
         if self.table.is_empty() {
             return RegistryEntry::Rejected;
         }
@@ -56,7 +56,7 @@ impl<'bump> Registry<'bump> {
         RegistryCache { cells: &mut self.table[start..end] }.entry(node)
     }
 
-    fn hash(&self, node: &BuilderNode<'_>) -> usize {
+    fn hash(&self, node: &BuilderNode<'_, V>) -> usize {
         // Basic FNV-1a hash as described:
         // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
         //
@@ -65,21 +65,21 @@ impl<'bump> Registry<'bump> {
         const FNV_PRIME: u64 = 1099511628211;
         let mut h = 14695981039346656037;
         h = (h ^ (node.is_final as u64)).wrapping_mul(FNV_PRIME);
-        h = (h ^ node.final_output.value()).wrapping_mul(FNV_PRIME);
+        h = (h ^ node.final_output.value().to_u64()).wrapping_mul(FNV_PRIME);
         for t in &node.trans {
             h = (h ^ (t.inp as u64)).wrapping_mul(FNV_PRIME);
-            h = (h ^ t.out.value()).wrapping_mul(FNV_PRIME);
+            h = (h ^ t.out.value().to_u64()).wrapping_mul(FNV_PRIME);
             h = (h ^ (t.addr as u64)).wrapping_mul(FNV_PRIME);
         }
         (h as usize) % self.table_size
     }
 }
 
-impl<'bump, 'a> RegistryCache<'bump, 'a> {
+impl<'bump, 'a, V: FstOutput> RegistryCache<'bump, 'a, V> {
     fn entry(
         mut self,
-        node: &BuilderNode<'_>,
-    ) -> RegistryEntry<'bump, 'a> {
+        node: &BuilderNode<'_, V>,
+    ) -> RegistryEntry<'bump, 'a, V> {
         if self.cells.len() == 1 {
             let cell = &mut self.cells[0];
             if !cell.is_none() && &cell.node == node {
@@ -106,7 +106,7 @@ impl<'bump, 'a> RegistryCache<'bump, 'a> {
             RegistryEntry::NotFound(&mut self.cells[0])
         } else {
             let find =
-                |c: &RegistryCell<'bump>| !c.is_none() && &c.node == node;
+                |c: &RegistryCell<'bump, V>| !c.is_none() && &c.node == node;
             if let Some(i) = self.cells.iter().position(find) {
                 let addr = self.cells[i].addr;
                 self.promote(i); // most recently used
@@ -129,8 +129,8 @@ impl<'bump, 'a> RegistryCache<'bump, 'a> {
     }
 }
 
-impl<'bump> RegistryCell<'bump> {
-    fn none(bump: &'bump Bump) -> RegistryCell<'bump> {
+impl<'bump, V: FstOutput> RegistryCell<'bump, V> {
+    fn none(bump: &'bump Bump) -> RegistryCell<'bump, V> {
         RegistryCell { addr: NONE_ADDRESS, node: BuilderNode::new(bump) }
     }
 
@@ -255,14 +255,12 @@ mod tests {
     #[test]
     fn promote() {
         let bump = Bump::new();
-        let bn = BuilderNode::new(&bump);
         let mut bnodes = vec![
             RegistryCell { addr: 1, node: bnode_new(&bump, false, Output::zero(), &[]) },
             RegistryCell { addr: 2, node: bnode_new(&bump, false, Output::zero(), &[]) },
             RegistryCell { addr: 3, node: bnode_new(&bump, false, Output::zero(), &[]) },
             RegistryCell { addr: 4, node: bnode_new(&bump, false, Output::zero(), &[]) },
         ];
-        drop(bn);
         let mut cache = RegistryCache { cells: &mut bnodes };
 
         cache.promote(0);

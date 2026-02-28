@@ -7,7 +7,7 @@ use crate::bytes;
 use crate::raw::build::BuilderNode;
 use crate::raw::common_inputs::{COMMON_INPUTS, COMMON_INPUTS_INV};
 use crate::raw::{
-    u64_to_usize, CompiledAddr, Output, Transition, EMPTY_ADDRESS,
+    u64_to_usize, CompiledAddr, FstOutput, Output, Transition, EMPTY_ADDRESS,
 };
 
 /// The threshold (in number of transitions) at which an index is created for
@@ -19,7 +19,7 @@ const TRANS_INDEX_THRESHOLD: usize = 32;
 ///
 /// Nodes are very cheap to construct. Notably, they satisfy the `Copy` trait.
 #[derive(Clone, Copy)]
-pub struct Node<'f> {
+pub struct Node<'f, V: FstOutput = u64> {
     data: &'f [u8],
     version: u64,
     state: State,
@@ -28,10 +28,10 @@ pub struct Node<'f> {
     is_final: bool,
     ntrans: usize,
     sizes: PackSizes,
-    final_output: Output,
+    final_output: Output<V>,
 }
 
-impl<'f> fmt::Debug for Node<'f> {
+impl<'f, V: FstOutput> fmt::Debug for Node<'f, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "NODE@{}", self.start)?;
         writeln!(f, "  end_addr: {}", self.end)?;
@@ -48,7 +48,7 @@ impl<'f> fmt::Debug for Node<'f> {
     }
 }
 
-impl<'f> Node<'f> {
+impl<'f, V: FstOutput> Node<'f, V> {
     /// Creates a new note at the address given.
     ///
     /// `data` should be a slice to an entire FST.
@@ -56,7 +56,7 @@ impl<'f> Node<'f> {
         version: u64,
         addr: CompiledAddr,
         data: &[u8],
-    ) -> Node<'_> {
+    ) -> Node<'_, V> {
         let state = State::new(data, addr);
         match state {
             State::EmptyFinal => Node {
@@ -120,13 +120,13 @@ impl<'f> Node<'f> {
     /// Returns an iterator over all transitions in this node in lexicographic
     /// order.
     #[inline]
-    pub fn transitions<'n>(&'n self) -> Transitions<'f, 'n> {
+    pub fn transitions<'n>(&'n self) -> Transitions<'f, 'n, V> {
         Transitions { node: self, range: 0..self.len() }
     }
 
     /// Returns the transition at index `i`.
     #[inline(always)]
-    pub fn transition(&self, i: usize) -> Transition {
+    pub fn transition(&self, i: usize) -> Transition<V> {
         // The `inline(always)` annotation on this function appears to
         // dramatically speed up FST traversal. In particular, measuring the
         // time it takes to run `fst range something-big.fst` shows almost a 2x
@@ -193,7 +193,7 @@ impl<'f> Node<'f> {
     /// If this node is final and has a terminal output value, then it is
     /// returned. Otherwise, a zero output is returned.
     #[inline]
-    pub fn final_output(&self) -> Output {
+    pub fn final_output(&self) -> Output<V> {
         self.final_output
     }
 
@@ -245,7 +245,7 @@ impl<'f> Node<'f> {
         wtr: W,
         last_addr: CompiledAddr,
         addr: CompiledAddr,
-        node: &BuilderNode<'_>,
+        node: &BuilderNode<'_, V>,
     ) -> io::Result<()> {
         assert!(node.trans.len() <= 256);
         if node.trans.is_empty()
@@ -254,25 +254,25 @@ impl<'f> Node<'f> {
         {
             return Ok(());
         } else if node.trans.len() != 1 || node.is_final {
-            StateAnyTrans::compile(wtr, addr, node)
+            StateAnyTrans::compile_generic(wtr, addr, node)
         } else {
             if node.trans[0].addr == last_addr && node.trans[0].out.is_zero() {
                 StateOneTransNext::compile(wtr, addr, node.trans[0].inp)
             } else {
-                StateOneTrans::compile(wtr, addr, node.trans[0])
+                StateOneTrans::compile_generic(wtr, addr, node.trans[0])
             }
         }
     }
 }
 
-impl BuilderNode<'_> {
+impl<V: FstOutput> BuilderNode<'_, V> {
     pub fn compile_to<W: io::Write>(
         &self,
         wtr: W,
         last_addr: CompiledAddr,
         addr: CompiledAddr,
     ) -> io::Result<()> {
-        Node::compile(wtr, last_addr, addr, self)
+        Node::<V>::compile(wtr, last_addr, addr, self)
     }
 }
 
@@ -353,7 +353,7 @@ impl StateOneTransNext {
     }
 
     #[inline]
-    fn input(&self, node: &Node<'_>) -> u8 {
+    fn input<V: FstOutput>(&self, node: &Node<'_, V>) -> u8 {
         if let Some(inp) = self.common_input() {
             inp
         } else {
@@ -362,18 +362,18 @@ impl StateOneTransNext {
     }
 
     #[inline]
-    fn trans_addr(&self, node: &Node<'_>) -> CompiledAddr {
+    fn trans_addr<V: FstOutput>(&self, node: &Node<'_, V>) -> CompiledAddr {
         node.end as CompiledAddr - 1
     }
 }
 
 impl StateOneTrans {
-    fn compile<W: io::Write>(
+    fn compile_generic<V: FstOutput, W: io::Write>(
         mut wtr: W,
         addr: CompiledAddr,
-        trans: Transition,
+        trans: Transition<V>,
     ) -> io::Result<()> {
-        let out = trans.out.value();
+        let out = trans.out.value().to_u64();
         let output_pack_size =
             if out == 0 { 0 } else { bytes::pack_uint(&mut wtr, out)? };
         let trans_pack_size = pack_delta(&mut wtr, addr, trans.addr)?;
@@ -432,7 +432,7 @@ impl StateOneTrans {
     }
 
     #[inline]
-    fn input(&self, node: &Node<'_>) -> u8 {
+    fn input<V: FstOutput>(&self, node: &Node<'_, V>) -> u8 {
         if let Some(inp) = self.common_input() {
             inp
         } else {
@@ -441,7 +441,7 @@ impl StateOneTrans {
     }
 
     #[inline]
-    fn output(&self, node: &Node<'_>) -> Output {
+    fn output<V: FstOutput>(&self, node: &Node<'_, V>) -> Output<V> {
         let osize = node.sizes.output_pack_size();
         if osize == 0 {
             return Output::zero();
@@ -451,11 +451,11 @@ impl StateOneTrans {
                 - self.input_len()
                 - 1 // pack size
                 - tsize - osize;
-        Output::new(bytes::unpack_uint(&node.data[i..], osize as u8))
+        Output::new(V::from_u64(bytes::unpack_uint(&node.data[i..], osize as u8)))
     }
 
     #[inline]
-    fn trans_addr(&self, node: &Node<'_>) -> CompiledAddr {
+    fn trans_addr<V: FstOutput>(&self, node: &Node<'_, V>) -> CompiledAddr {
         let tsize = node.sizes.transition_pack_size();
         let i = node.start
                 - self.input_len()
@@ -466,19 +466,19 @@ impl StateOneTrans {
 }
 
 impl StateAnyTrans {
-    fn compile<W: io::Write>(
+    fn compile_generic<V: FstOutput, W: io::Write>(
         mut wtr: W,
         addr: CompiledAddr,
-        node: &BuilderNode<'_>,
+        node: &BuilderNode<'_, V>,
     ) -> io::Result<()> {
         assert!(node.trans.len() <= 256);
 
         let mut tsize = 0;
-        let mut osize = bytes::pack_size(node.final_output.value());
+        let mut osize = bytes::pack_size(node.final_output.value().to_u64());
         let mut any_outs = !node.final_output.is_zero();
         for t in &node.trans {
             tsize = cmp::max(tsize, pack_delta_size(addr, t.addr));
-            osize = cmp::max(osize, bytes::pack_size(t.out.value()));
+            osize = cmp::max(osize, bytes::pack_size(t.out.value().to_u64()));
             any_outs = any_outs || !t.out.is_zero();
         }
 
@@ -498,12 +498,12 @@ impl StateAnyTrans {
             if node.is_final {
                 bytes::pack_uint_in(
                     &mut wtr,
-                    node.final_output.value(),
+                    node.final_output.value().to_u64(),
                     osize,
                 )?;
             }
             for t in node.trans.iter().rev() {
-                bytes::pack_uint_in(&mut wtr, t.out.value(), osize)?;
+                bytes::pack_uint_in(&mut wtr, t.out.value().to_u64(), osize)?;
             }
         }
         for t in node.trans.iter().rev() {
@@ -625,13 +625,13 @@ impl StateAnyTrans {
     }
 
     #[inline]
-    fn final_output(
+    fn final_output<V: FstOutput>(
         &self,
         version: u64,
         data: &[u8],
         sizes: PackSizes,
         ntrans: usize,
-    ) -> Output {
+    ) -> Output<V> {
         let osize = sizes.output_pack_size();
         if osize == 0 || !self.is_final_state() {
             return Output::zero();
@@ -642,7 +642,7 @@ impl StateAnyTrans {
                  - self.total_trans_size(version, sizes, ntrans)
                  - (ntrans * osize) // output values
                  - osize; // the desired output value
-        Output::new(bytes::unpack_uint(&data[at..], osize as u8))
+        Output::new(V::from_u64(bytes::unpack_uint(&data[at..], osize as u8)))
     }
 
     #[inline]
@@ -664,7 +664,7 @@ impl StateAnyTrans {
     }
 
     #[inline]
-    fn trans_addr(&self, node: &Node<'_>, i: usize) -> CompiledAddr {
+    fn trans_addr<V: FstOutput>(&self, node: &Node<'_, V>, i: usize) -> CompiledAddr {
         assert!(i < node.ntrans);
         let tsize = node.sizes.transition_pack_size();
         let at = node.start
@@ -678,7 +678,7 @@ impl StateAnyTrans {
     }
 
     #[inline]
-    fn input(&self, node: &Node<'_>, i: usize) -> u8 {
+    fn input<V: FstOutput>(&self, node: &Node<'_, V>, i: usize) -> u8 {
         let at = node.start
                  - self.ntrans_len()
                  - 1 // pack size
@@ -689,7 +689,7 @@ impl StateAnyTrans {
     }
 
     #[inline]
-    fn find_input(&self, node: &Node<'_>, b: u8) -> Option<usize> {
+    fn find_input<V: FstOutput>(&self, node: &Node<'_, V>, b: u8) -> Option<usize> {
         if node.version >= 2 && node.ntrans > TRANS_INDEX_THRESHOLD {
             let start = node.start
                         - self.ntrans_len()
@@ -713,7 +713,7 @@ impl StateAnyTrans {
     }
 
     #[inline]
-    fn output(&self, node: &Node<'_>, i: usize) -> Output {
+    fn output<V: FstOutput>(&self, node: &Node<'_, V>, i: usize) -> Output<V> {
         let osize = node.sizes.output_pack_size();
         if osize == 0 {
             return Output::zero();
@@ -724,7 +724,7 @@ impl StateAnyTrans {
                  - self.total_trans_size(node.version, node.sizes, node.ntrans)
                  - (i * osize) // the previous outputs
                  - osize; // the desired output value
-        Output::new(bytes::unpack_uint(&node.data[at..], osize as u8))
+        Output::new(V::from_u64(bytes::unpack_uint(&node.data[at..], osize as u8)))
     }
 }
 
@@ -778,16 +778,16 @@ impl PackSizes {
 ///
 /// `'f` is the lifetime of the underlying fst and `'n` is the lifetime of
 /// the underlying `Node`.
-pub struct Transitions<'f, 'n> {
-    node: &'n Node<'f>,
+pub struct Transitions<'f, 'n, V: FstOutput = u64> {
+    node: &'n Node<'f, V>,
     range: Range<usize>,
 }
 
-impl<'f, 'n> Iterator for Transitions<'f, 'n> {
-    type Item = Transition;
+impl<'f, 'n, V: FstOutput> Iterator for Transitions<'f, 'n, V> {
+    type Item = Transition<V>;
 
     #[inline]
-    fn next(&mut self) -> Option<Transition> {
+    fn next(&mut self) -> Option<Transition<V>> {
         self.range.next().map(|i| self.node.transition(i))
     }
 }
@@ -957,7 +957,7 @@ mod tests {
         let bump = Bump::new();
         let bnode = bnode_new(&bump, false, Output::zero(), &[]);
         let (addr, buf) = compile(&bnode);
-        let node = Node::new(VERSION, addr, &buf);
+        let node: Node<'_, u64> = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 3);
         roundtrip(&bnode);
     }
@@ -972,7 +972,7 @@ mod tests {
             &[trans(20, b'a')],
         );
         let (addr, buf) = compile(&bnode);
-        let node = Node::new(VERSION, addr, &buf);
+        let node: Node<'_, u64> = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 3);
         roundtrip(&bnode);
     }
@@ -987,7 +987,7 @@ mod tests {
             &[trans(2, b'\xff')],
         );
         let (addr, buf) = compile(&bnode);
-        let node = Node::new(VERSION, addr, &buf);
+        let node: Node<'_, u64> = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 4);
         roundtrip(&bnode);
     }
@@ -1009,7 +1009,7 @@ mod tests {
             ],
         );
         let (addr, buf) = compile(&bnode);
-        let node = Node::new(VERSION, addr, &buf);
+        let node: Node<'_, u64> = Node::new(VERSION, addr, &buf);
         assert_eq!(node.as_slice().len(), 14);
         roundtrip(&bnode);
     }
@@ -1021,7 +1021,7 @@ mod tests {
             (0..256).map(|i| trans(0, i as u8)).collect();
         let bnode = bnode_new(&bump, false, Output::zero(), &transitions);
         let (addr, buf) = compile(&bnode);
-        let node = Node::new(VERSION, addr, &buf);
+        let node: Node<'_, u64> = Node::new(VERSION, addr, &buf);
         assert_eq!(node.transitions().count(), 256);
         assert_eq!(node.len(), node.transitions().count());
         roundtrip(&bnode);

@@ -20,6 +20,7 @@ Most of the rest of the types are streams from set operations.
 */
 use std::cmp;
 use std::fmt;
+use std::hash::Hash;
 
 use crate::automaton::{AlwaysMatch, Automaton};
 use crate::bytes;
@@ -266,9 +267,10 @@ pub type CompiledAddr = usize;
 /// * [Comparison of Construction Algorithms for Minimal, Acyclic, Deterministic, Finite-State Automata from Sets of Strings](https://www.cs.mun.ca/~harold/Courses/Old/CS4750/Diary/q3p2qx4lv71m5vew.pdf)
 ///   (excellent for surface level overview)
 #[derive(Clone)]
-pub struct Fst<D> {
+pub struct Fst<D, V: FstOutput = u64> {
     meta: Meta,
     data: D,
+    _phantom: std::marker::PhantomData<V>,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +331,46 @@ impl Fst<Vec<u8>> {
     }
 }
 
+impl<V: FstOutput> Fst<Vec<u8>, V> {
+    /// Create a new FST from an iterator of lexicographically ordered byte
+    /// strings with a specific output value type. Every key's value is set
+    /// to the zero value of V.
+    pub fn from_iter_set_typed<K, I>(iter: I) -> Result<Fst<Vec<u8>, V>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        // Sets always use zero outputs, so we can just build with u64 and
+        // reinterpret
+        let bump = bumpalo::Bump::new();
+        let mut builder = Builder::memory(&bump);
+        for k in iter {
+            builder.add(k)?;
+        }
+        let bytes = builder.into_inner()?;
+        Fst::new_typed(bytes)
+    }
+
+    /// Create a new FST from an iterator of lexicographically ordered
+    /// key-value pairs with a specific output value type.
+    ///
+    /// Values are converted from `V` to `u64` for serialization, then
+    /// deserialized back as `V`. Values must fit within the range of `V`.
+    pub fn from_iter_map_typed<K, I>(iter: I) -> Result<Fst<Vec<u8>, V>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let bump = bumpalo::Bump::new();
+        let mut builder = Builder::memory(&bump);
+        for (k, v) in iter {
+            builder.insert(k, v.to_u64())?;
+        }
+        let bytes = builder.into_inner()?;
+        Fst::new_typed(bytes)
+    }
+}
+
 impl<D: AsRef<[u8]>> Fst<D> {
     /// Creates a transducer from its representation as a raw byte sequence.
     ///
@@ -341,6 +383,8 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// transducer builder (`Builder` qualifies). If the format is invalid or
     /// if there is a mismatch between the API version of this library and the
     /// fst, then an error is returned.
+    ///
+    /// The output type defaults to `u64`.
     #[inline]
     pub fn new(data: D) -> Result<Fst<D>> {
         let bytes = data.as_ref();
@@ -404,14 +448,31 @@ impl<D: AsRef<[u8]>> Fst<D> {
             return Err(Error::Format { size: bytes.len() }.into());
         }
         let meta = Meta { version, root_addr, ty, len, checksum };
-        Ok(Fst { meta, data })
+        Ok(Fst { meta, data, _phantom: std::marker::PhantomData })
     }
 
+    /// Creates a transducer with a specific output type from raw bytes.
+    ///
+    /// This is the typed counterpart of `new`. The output type `V` determines
+    /// how output values are interpreted.
+    #[inline]
+    pub fn new_typed<V2: FstOutput>(data: D) -> Result<Fst<D, V2>> {
+        let fst = Fst::<D>::new(data)?;
+        Ok(Fst {
+            meta: fst.meta,
+            data: fst.data,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+}
+
+impl<D: AsRef<[u8]>, V: FstOutput> Fst<D, V> {
     /// Retrieves the value associated with a key.
     ///
     /// If the key does not exist, then `None` is returned.
     #[inline]
-    pub fn get<B: AsRef<[u8]>>(&self, key: B) -> Option<Output> {
+    pub fn get<B: AsRef<[u8]>>(&self, key: B) -> Option<Output<V>> {
         self.as_ref().get(key.as_ref())
     }
 
@@ -431,7 +492,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// The values in this FST are not monotonically increasing when sorted
     /// lexicographically by key, then this routine has unspecified behavior.
     #[inline]
-    pub fn get_key(&self, value: u64) -> Option<Vec<u8>> {
+    pub fn get_key(&self, value: V) -> Option<Vec<u8>> {
         let mut key = vec![];
         if self.get_key_into(value, &mut key) {
             Some(key)
@@ -450,14 +511,14 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// The values in this FST are not monotonically increasing when sorted
     /// lexicographically by key, then this routine has unspecified behavior.
     #[inline]
-    pub fn get_key_into(&self, value: u64, key: &mut Vec<u8>) -> bool {
+    pub fn get_key_into(&self, value: V, key: &mut Vec<u8>) -> bool {
         self.as_ref().get_key_into(value, key)
     }
 
     /// Return a lexicographically ordered stream of all key-value pairs in
     /// this fst.
     #[inline]
-    pub fn stream(&self) -> Stream<'_> {
+    pub fn stream(&self) -> Stream<'_, AlwaysMatch, V> {
         StreamBuilder::new(self.as_ref(), AlwaysMatch).into_stream()
     }
 
@@ -466,13 +527,13 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// A range query returns a subset of key-value pairs in this fst in a
     /// range given in lexicographic order.
     #[inline]
-    pub fn range(&self) -> StreamBuilder<'_> {
+    pub fn range(&self) -> StreamBuilder<'_, AlwaysMatch, V> {
         StreamBuilder::new(self.as_ref(), AlwaysMatch)
     }
 
     /// Executes an automaton on the keys of this FST.
     #[inline]
-    pub fn search<A: Automaton>(&self, aut: A) -> StreamBuilder<'_, A> {
+    pub fn search<A: Automaton>(&self, aut: A) -> StreamBuilder<'_, A, V> {
         StreamBuilder::new(self.as_ref(), aut)
     }
 
@@ -483,7 +544,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     pub fn search_with_state<A: Automaton>(
         &self,
         aut: A,
-    ) -> StreamWithStateBuilder<'_, A> {
+    ) -> StreamWithStateBuilder<'_, A, V> {
         StreamWithStateBuilder::new(self.as_ref(), aut)
     }
 
@@ -540,7 +601,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// symmetric difference on the keys of the fst. These set operations also
     /// allow one to specify how conflicting values are merged in the stream.
     #[inline]
-    pub fn op(&self) -> OpBuilder<'_> {
+    pub fn op(&self) -> OpBuilder<'_, V> {
         OpBuilder::new().add(self)
     }
 
@@ -552,8 +613,8 @@ impl<D: AsRef<[u8]>> Fst<D> {
     #[inline]
     pub fn is_disjoint<'f, I, S>(&self, stream: I) -> bool
     where
-        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
     {
         self.op().add(stream).intersection().next().is_none()
     }
@@ -566,8 +627,8 @@ impl<D: AsRef<[u8]>> Fst<D> {
     #[inline]
     pub fn is_subset<'f, I, S>(&self, stream: I) -> bool
     where
-        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
     {
         let mut op = self.op().add(stream).intersection();
         let mut count = 0;
@@ -585,8 +646,8 @@ impl<D: AsRef<[u8]>> Fst<D> {
     #[inline]
     pub fn is_superset<'f, I, S>(&self, stream: I) -> bool
     where
-        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
     {
         let mut op = self.op().add(stream).union();
         let mut count = 0;
@@ -610,7 +671,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
 
     /// Returns the root node of this fst.
     #[inline]
-    pub fn root(&self) -> Node<'_> {
+    pub fn root(&self) -> Node<'_, V> {
         self.as_ref().root()
     }
 
@@ -618,7 +679,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     ///
     /// Node addresses can be obtained by reading transitions on `Node` values.
     #[inline]
-    pub fn node(&self, addr: CompiledAddr) -> Node<'_> {
+    pub fn node(&self, addr: CompiledAddr) -> Node<'_, V> {
         self.as_ref().node(addr)
     }
 
@@ -634,13 +695,6 @@ impl<D: AsRef<[u8]>> Fst<D> {
         self.as_ref().as_bytes()
     }
 
-    #[inline]
-    fn as_ref(&self) -> FstRef {
-        FstRef { meta: &self.meta, data: self.data.as_ref() }
-    }
-}
-
-impl<D> Fst<D> {
     /// Returns the underlying data which constitutes the FST itself.
     #[inline]
     pub fn into_inner(self) -> D {
@@ -653,35 +707,42 @@ impl<D> Fst<D> {
         &self.data
     }
 
-    /// Maps the underlying data of the fst to another data type.
+    /// Maps the underlying data of the fst to another data type, preserving
+    /// the output type.
     #[inline]
-    pub fn map_data<F, T>(self, mut f: F) -> Result<Fst<T>>
+    pub fn map_data<F, T>(self, mut f: F) -> Result<Fst<T, V>>
     where
         F: FnMut(D) -> T,
         T: AsRef<[u8]>,
     {
-        Fst::new(f(self.into_inner()))
+        Fst::new_typed(f(self.data))
+    }
+
+    #[inline]
+    fn as_ref(&self) -> FstRef<'_, V> {
+        FstRef { meta: &self.meta, data: self.data.as_ref(), _phantom: std::marker::PhantomData }
     }
 }
 
-impl<'a, 'f, D: AsRef<[u8]>> IntoStreamer<'a> for &'f Fst<D> {
-    type Item = (&'a [u8], Output);
-    type Into = Stream<'f>;
+impl<'a, 'f, D: AsRef<[u8]>, V: FstOutput + 'a> IntoStreamer<'a> for &'f Fst<D, V> {
+    type Item = (&'a [u8], Output<V>);
+    type Into = Stream<'f, AlwaysMatch, V>;
 
     #[inline]
-    fn into_stream(self) -> Stream<'f> {
+    fn into_stream(self) -> Stream<'f, AlwaysMatch, V> {
         StreamBuilder::new(self.as_ref(), AlwaysMatch).into_stream()
     }
 }
 
-struct FstRef<'f> {
+struct FstRef<'f, V: FstOutput = u64> {
     meta: &'f Meta,
     data: &'f [u8],
+    _phantom: std::marker::PhantomData<V>,
 }
 
-impl<'f> FstRef<'f> {
+impl<'f, V: FstOutput> FstRef<'f, V> {
     #[inline]
-    fn get(&self, key: &[u8]) -> Option<Output> {
+    fn get(&self, key: &[u8]) -> Option<Output<V>> {
         let mut node = self.root();
         let mut out = Output::zero();
         for &b in key {
@@ -714,9 +775,9 @@ impl<'f> FstRef<'f> {
     }
 
     #[inline]
-    fn get_key_into(&self, mut value: u64, key: &mut Vec<u8>) -> bool {
+    fn get_key_into(&self, mut value: V, key: &mut Vec<u8>) -> bool {
         let mut node = self.root();
-        while value != 0 || !node.is_final() {
+        while !value.is_zero() || !node.is_final() {
             let trans = node
                 .transitions()
                 .take_while(|t| t.out.value() <= value)
@@ -724,7 +785,7 @@ impl<'f> FstRef<'f> {
             node = match trans {
                 None => return false,
                 Some(t) => {
-                    value -= t.out.value();
+                    value = value.sub(t.out.value());
                     key.push(t.inp);
                     self.node(t.addr)
                 }
@@ -759,12 +820,12 @@ impl<'f> FstRef<'f> {
     }
 
     #[inline]
-    fn root(&self) -> Node<'f> {
+    fn root(&self) -> Node<'f, V> {
         self.node(self.root_addr())
     }
 
     #[inline]
-    fn node(&self, addr: CompiledAddr) -> Node<'f> {
+    fn node(&self, addr: CompiledAddr) -> Node<'f, V> {
         Node::new(self.meta.version, addr, self.as_bytes())
     }
 
@@ -779,7 +840,7 @@ impl<'f> FstRef<'f> {
     }
 
     #[inline]
-    fn empty_final_output(&self) -> Option<Output> {
+    fn empty_final_output(&self) -> Option<Output<V>> {
         let root = self.root();
         if root.is_final() {
             Some(root.final_output())
@@ -801,15 +862,15 @@ impl<'f> FstRef<'f> {
 /// the stream. By default, no filtering is done.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
-pub struct StreamBuilder<'f, A = AlwaysMatch> {
-    fst: FstRef<'f>,
+pub struct StreamBuilder<'f, A = AlwaysMatch, V: FstOutput = u64> {
+    fst: FstRef<'f, V>,
     aut: A,
     min: Bound,
     max: Bound,
 }
 
-impl<'f, A: Automaton> StreamBuilder<'f, A> {
-    fn new(fst: FstRef<'f>, aut: A) -> StreamBuilder<'f, A> {
+impl<'f, A: Automaton, V: FstOutput> StreamBuilder<'f, A, V> {
+    fn new(fst: FstRef<'f, V>, aut: A) -> StreamBuilder<'f, A, V> {
         StreamBuilder {
             fst,
             aut,
@@ -819,35 +880,35 @@ impl<'f, A: Automaton> StreamBuilder<'f, A> {
     }
 
     /// Specify a greater-than-or-equal-to bound.
-    pub fn ge<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A> {
+    pub fn ge<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A, V> {
         self.min = Bound::Included(bound.as_ref().to_owned());
         self
     }
 
     /// Specify a greater-than bound.
-    pub fn gt<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A> {
+    pub fn gt<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A, V> {
         self.min = Bound::Excluded(bound.as_ref().to_owned());
         self
     }
 
     /// Specify a less-than-or-equal-to bound.
-    pub fn le<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A> {
+    pub fn le<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A, V> {
         self.max = Bound::Included(bound.as_ref().to_owned());
         self
     }
 
     /// Specify a less-than bound.
-    pub fn lt<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A> {
+    pub fn lt<T: AsRef<[u8]>>(mut self, bound: T) -> StreamBuilder<'f, A, V> {
         self.max = Bound::Excluded(bound.as_ref().to_owned());
         self
     }
 }
 
-impl<'a, 'f, A: Automaton> IntoStreamer<'a> for StreamBuilder<'f, A> {
-    type Item = (&'a [u8], Output);
-    type Into = Stream<'f, A>;
+impl<'a, 'f, A: Automaton, V: FstOutput + 'a> IntoStreamer<'a> for StreamBuilder<'f, A, V> {
+    type Item = (&'a [u8], Output<V>);
+    type Into = Stream<'f, A, V>;
 
-    fn into_stream(self) -> Stream<'f, A> {
+    fn into_stream(self) -> Stream<'f, A, V> {
         Stream::new(self.fst, self.aut, self.min, self.max)
     }
 }
@@ -869,15 +930,15 @@ impl<'a, 'f, A: Automaton> IntoStreamer<'a> for StreamBuilder<'f, A> {
 /// the stream. By default, no filtering is done.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
-pub struct StreamWithStateBuilder<'f, A = AlwaysMatch> {
-    fst: FstRef<'f>,
+pub struct StreamWithStateBuilder<'f, A = AlwaysMatch, V: FstOutput = u64> {
+    fst: FstRef<'f, V>,
     aut: A,
     min: Bound,
     max: Bound,
 }
 
-impl<'f, A: Automaton> StreamWithStateBuilder<'f, A> {
-    fn new(fst: FstRef<'f>, aut: A) -> StreamWithStateBuilder<'f, A> {
+impl<'f, A: Automaton, V: FstOutput> StreamWithStateBuilder<'f, A, V> {
+    fn new(fst: FstRef<'f, V>, aut: A) -> StreamWithStateBuilder<'f, A, V> {
         StreamWithStateBuilder {
             fst,
             aut,
@@ -890,7 +951,7 @@ impl<'f, A: Automaton> StreamWithStateBuilder<'f, A> {
     pub fn ge<T: AsRef<[u8]>>(
         mut self,
         bound: T,
-    ) -> StreamWithStateBuilder<'f, A> {
+    ) -> StreamWithStateBuilder<'f, A, V> {
         self.min = Bound::Included(bound.as_ref().to_owned());
         self
     }
@@ -899,7 +960,7 @@ impl<'f, A: Automaton> StreamWithStateBuilder<'f, A> {
     pub fn gt<T: AsRef<[u8]>>(
         mut self,
         bound: T,
-    ) -> StreamWithStateBuilder<'f, A> {
+    ) -> StreamWithStateBuilder<'f, A, V> {
         self.min = Bound::Excluded(bound.as_ref().to_owned());
         self
     }
@@ -908,7 +969,7 @@ impl<'f, A: Automaton> StreamWithStateBuilder<'f, A> {
     pub fn le<T: AsRef<[u8]>>(
         mut self,
         bound: T,
-    ) -> StreamWithStateBuilder<'f, A> {
+    ) -> StreamWithStateBuilder<'f, A, V> {
         self.max = Bound::Included(bound.as_ref().to_owned());
         self
     }
@@ -917,21 +978,21 @@ impl<'f, A: Automaton> StreamWithStateBuilder<'f, A> {
     pub fn lt<T: AsRef<[u8]>>(
         mut self,
         bound: T,
-    ) -> StreamWithStateBuilder<'f, A> {
+    ) -> StreamWithStateBuilder<'f, A, V> {
         self.max = Bound::Excluded(bound.as_ref().to_owned());
         self
     }
 }
 
-impl<'a, 'f, A: 'a + Automaton> IntoStreamer<'a>
-    for StreamWithStateBuilder<'f, A>
+impl<'a, 'f, A: 'a + Automaton, V: FstOutput + 'a> IntoStreamer<'a>
+    for StreamWithStateBuilder<'f, A, V>
 where
     A::State: Clone,
 {
-    type Item = (&'a [u8], Output, A::State);
-    type Into = StreamWithState<'f, A>;
+    type Item = (&'a [u8], Output<V>, A::State);
+    type Into = StreamWithState<'f, A, V>;
 
-    fn into_stream(self) -> StreamWithState<'f, A> {
+    fn into_stream(self) -> StreamWithState<'f, A, V> {
         StreamWithState::new(self.fst, self.aut, self.min, self.max)
     }
 }
@@ -977,17 +1038,17 @@ impl Bound {
 /// the stream. By default, no filtering is done.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
-pub struct Stream<'f, A: Automaton = AlwaysMatch>(StreamWithState<'f, A>);
+pub struct Stream<'f, A: Automaton = AlwaysMatch, V: FstOutput = u64>(StreamWithState<'f, A, V>);
 
-impl<'f, A: Automaton> Stream<'f, A> {
-    fn new(fst: FstRef<'f>, aut: A, min: Bound, max: Bound) -> Stream<'f, A> {
+impl<'f, A: Automaton, V: FstOutput> Stream<'f, A, V> {
+    fn new(fst: FstRef<'f, V>, aut: A, min: Bound, max: Bound) -> Stream<'f, A, V> {
         Stream(StreamWithState::new(fst, aut, min, max))
     }
 
     /// Convert this stream into a vector of byte strings and outputs.
     ///
     /// Note that this creates a new allocation for every key in the stream.
-    pub fn into_byte_vec(mut self) -> Vec<(Vec<u8>, u64)> {
+    pub fn into_byte_vec(mut self) -> Vec<(Vec<u8>, V)> {
         let mut vs = vec![];
         while let Some((k, v)) = self.next() {
             vs.push((k.to_vec(), v.value()));
@@ -1001,7 +1062,7 @@ impl<'f, A: Automaton> Stream<'f, A> {
     /// and a UTF-8 decoding error is returned.
     ///
     /// Note that this creates a new allocation for every key in the stream.
-    pub fn into_str_vec(mut self) -> Result<Vec<(String, u64)>> {
+    pub fn into_str_vec(mut self) -> Result<Vec<(String, V)>> {
         let mut vs = vec![];
         while let Some((k, v)) = self.next() {
             let k = String::from_utf8(k.to_vec()).map_err(Error::from)?;
@@ -1037,7 +1098,7 @@ impl<'f, A: Automaton> Stream<'f, A> {
     }
 
     /// Convert this stream into a vector of outputs.
-    pub fn into_values(mut self) -> Vec<u64> {
+    pub fn into_values(mut self) -> Vec<V> {
         let mut vs = vec![];
         while let Some((_, v)) = self.next() {
             vs.push(v.value());
@@ -1046,10 +1107,10 @@ impl<'f, A: Automaton> Stream<'f, A> {
     }
 }
 
-impl<'f, 'a, A: Automaton> Streamer<'a> for Stream<'f, A> {
-    type Item = (&'a [u8], Output);
+impl<'f, 'a, A: Automaton, V: FstOutput + 'a> Streamer<'a> for Stream<'f, A, V> {
+    type Item = (&'a [u8], Output<V>);
 
-    fn next(&'a mut self) -> Option<(&'a [u8], Output)> {
+    fn next(&'a mut self) -> Option<(&'a [u8], Output<V>)> {
         self.0.next_with(|_| ()).map(|(key, out, _)| (key, out))
     }
 }
@@ -1057,40 +1118,40 @@ impl<'f, 'a, A: Automaton> Streamer<'a> for Stream<'f, A> {
 /// A lexicographically ordered stream of key-value-state triples from an fst
 /// and an automaton.
 ///
-/// The key-values are from the underyling FSTP while the states are from the
+/// The key-values are from the underyling FST while the states are from the
 /// automaton.
 ///
 /// The `A` type parameter corresponds to an optional automaton to filter
 /// the stream. By default, no filtering is done.
 ///
-/// The `'m` lifetime parameter refers to the lifetime of the underlying map.
-pub struct StreamWithState<'f, A = AlwaysMatch>
+/// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
+pub struct StreamWithState<'f, A = AlwaysMatch, V: FstOutput = u64>
 where
     A: Automaton,
 {
-    fst: FstRef<'f>,
+    fst: FstRef<'f, V>,
     aut: A,
     inp: Vec<u8>,
-    empty_output: Option<Output>,
-    stack: Vec<StreamState<'f, A::State>>,
+    empty_output: Option<Output<V>>,
+    stack: Vec<StreamState<'f, A::State, V>>,
     end_at: Bound,
 }
 
 #[derive(Clone, Debug)]
-struct StreamState<'f, S> {
-    node: Node<'f>,
+struct StreamState<'f, S, V: FstOutput = u64> {
+    node: Node<'f, V>,
     trans: usize,
-    out: Output,
+    out: Output<V>,
     aut_state: S,
 }
 
-impl<'f, A: Automaton> StreamWithState<'f, A> {
+impl<'f, A: Automaton, V: FstOutput> StreamWithState<'f, A, V> {
     fn new(
-        fst: FstRef<'f>,
+        fst: FstRef<'f, V>,
         aut: A,
         min: Bound,
         max: Bound,
-    ) -> StreamWithState<'f, A> {
+    ) -> StreamWithState<'f, A, V> {
         let mut rdr = StreamWithState {
             fst,
             aut,
@@ -1128,12 +1189,6 @@ impl<'f, A: Automaton> StreamWithState<'f, A> {
             Bound::Included(ref min) => (min, true),
             Bound::Unbounded => unreachable!(),
         };
-        // At this point, we need to find the starting location of `min` in
-        // the FST. However, as we search, we need to maintain a stack of
-        // reader states so that the reader can pick up where we left off.
-        // N.B. We do not necessarily need to stop in a final state, unlike
-        // the one-off `find` method. For the example, the given bound might
-        // not actually exist in the FST.
         let mut node = self.fst.root();
         let mut out = Output::zero();
         let mut aut_state = self.aut.start();
@@ -1154,11 +1209,6 @@ impl<'f, A: Automaton> StreamWithState<'f, A> {
                     node = self.fst.node(t.addr);
                 }
                 None => {
-                    // This is a little tricky. We're in this case if the
-                    // given bound is not a prefix of any key in the FST.
-                    // Since this is a minimum bound, we need to find the
-                    // first transition in this node that proceeds the current
-                    // input byte.
                     self.stack.push(StreamState {
                         node,
                         trans: node
@@ -1193,7 +1243,7 @@ impl<'f, A: Automaton> StreamWithState<'f, A> {
     fn next_with<T>(
         &mut self,
         mut map: impl FnMut(&A::State) -> T,
-    ) -> Option<(&[u8], Output, T)> {
+    ) -> Option<(&[u8], Output<V>, T)> {
         if let Some(out) = self.empty_output.take() {
             if self.end_at.exceeded_by(&[]) {
                 self.stack.clear();
@@ -1234,7 +1284,6 @@ impl<'f, A: Automaton> StreamWithState<'f, A> {
                 aut_state: next_state,
             });
             if self.end_at.exceeded_by(&self.inp) {
-                // We are done, forever.
                 self.stack.clear();
                 return None;
             }
@@ -1250,16 +1299,86 @@ impl<'f, A: Automaton> StreamWithState<'f, A> {
     }
 }
 
-impl<'a, 'f, A: 'a + Automaton> Streamer<'a> for StreamWithState<'f, A>
+impl<'a, 'f, A: 'a + Automaton, V: FstOutput + 'a> Streamer<'a> for StreamWithState<'f, A, V>
 where
     A::State: Clone,
 {
-    type Item = (&'a [u8], Output, A::State);
+    type Item = (&'a [u8], Output<V>, A::State);
 
-    fn next(&'a mut self) -> Option<(&'a [u8], Output, A::State)> {
+    fn next(&'a mut self) -> Option<(&'a [u8], Output<V>, A::State)> {
         self.next_with(|state| state.clone())
     }
 }
+
+/// A trait for types that can be used as output values in a finite state
+/// transducer.
+///
+/// Output values must satisfy an algebra with an additive identity and the
+/// following binary operations: `prefix` (min), `cat` (add), and `sub`
+/// (checked subtract). `prefix` and `cat` are commutative while `sub` is not.
+/// `sub` is only defined on pairs where the first operand is >= the second.
+///
+/// Additionally, values must be convertible to/from `u64` for serialization,
+/// since the byte encoding layer works with `u64`.
+pub trait FstOutput:
+    Copy + Clone + fmt::Debug + Hash + Eq + Ord + PartialEq + PartialOrd + Default + 'static
+{
+    /// The additive identity.
+    fn zero() -> Self;
+    /// Returns true if this value is the additive identity.
+    fn is_zero(self) -> bool;
+    /// Returns the prefix (minimum) of `self` and `other`.
+    fn prefix(self, other: Self) -> Self;
+    /// Returns the concatenation (sum) of `self` and `other`.
+    fn cat(self, other: Self) -> Self;
+    /// Returns `self - other`. Panics if `self < other`.
+    fn sub(self, other: Self) -> Self;
+    /// Convert to `u64` for byte serialization.
+    fn to_u64(self) -> u64;
+    /// Convert from `u64` during deserialization.
+    fn from_u64(v: u64) -> Self;
+}
+
+macro_rules! impl_fst_output {
+    ($ty:ty) => {
+        impl FstOutput for $ty {
+            #[inline]
+            fn zero() -> Self {
+                0
+            }
+            #[inline]
+            fn is_zero(self) -> bool {
+                self == 0
+            }
+            #[inline]
+            fn prefix(self, other: Self) -> Self {
+                cmp::min(self, other)
+            }
+            #[inline]
+            fn cat(self, other: Self) -> Self {
+                self + other
+            }
+            #[inline]
+            fn sub(self, other: Self) -> Self {
+                self.checked_sub(other)
+                    .expect("BUG: underflow subtraction not allowed")
+            }
+            #[inline]
+            fn to_u64(self) -> u64 {
+                self as u64
+            }
+            #[inline]
+            fn from_u64(v: u64) -> Self {
+                v as Self
+            }
+        }
+    };
+}
+
+impl_fst_output!(u8);
+impl_fst_output!(u16);
+impl_fst_output!(u32);
+impl_fst_output!(u64);
 
 /// An output is a value that is associated with a key in a finite state
 /// transducer.
@@ -1271,88 +1390,84 @@ where
 /// pairs of operands where the first operand is greater than or equal to the
 /// second operand.
 ///
-/// Currently, output values must be `u64`. However, in theory, an output value
-/// can be anything that satisfies the above algebra. Future versions of this
-/// crate may make outputs generic on this algebra.
+/// The type parameter `V` determines the output value type. It defaults to
+/// `u64` but can be any type implementing `FstOutput` (e.g. `u8`, `u16`,
+/// `u32`).
 #[derive(Copy, Clone, Debug, Hash, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Output(u64);
+pub struct Output<V: FstOutput = u64>(V);
 
-impl Output {
-    /// Create a new output from a `u64`.
+impl<V: FstOutput> Output<V> {
+    /// Create a new output from a value.
     #[inline]
-    pub fn new(v: u64) -> Output {
+    pub fn new(v: V) -> Output<V> {
         Output(v)
     }
 
     /// Create a zero output.
     #[inline]
-    pub fn zero() -> Output {
-        Output(0)
+    pub fn zero() -> Output<V> {
+        Output(V::zero())
     }
 
     /// Retrieve the value inside this output.
     #[inline]
-    pub fn value(self) -> u64 {
+    pub fn value(self) -> V {
         self.0
     }
 
     /// Returns true if this is a zero output.
     #[inline]
     pub fn is_zero(self) -> bool {
-        self.0 == 0
+        self.0.is_zero()
     }
 
     /// Returns the prefix of this output and `o`.
     #[inline]
-    pub fn prefix(self, o: Output) -> Output {
-        Output(cmp::min(self.0, o.0))
+    pub fn prefix(self, o: Output<V>) -> Output<V> {
+        Output(self.0.prefix(o.0))
     }
 
     /// Returns the concatenation of this output and `o`.
     #[inline]
-    pub fn cat(self, o: Output) -> Output {
-        Output(self.0 + o.0)
+    pub fn cat(self, o: Output<V>) -> Output<V> {
+        Output(self.0.cat(o.0))
     }
 
     /// Returns the subtraction of `o` from this output.
     ///
     /// This function panics if `self < o`.
     #[inline]
-    pub fn sub(self, o: Output) -> Output {
-        Output(
-            self.0
-                .checked_sub(o.0)
-                .expect("BUG: underflow subtraction not allowed"),
-        )
+    pub fn sub(self, o: Output<V>) -> Output<V> {
+        Output(self.0.sub(o.0))
     }
 }
 
 /// A transition from one note to another.
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
-pub struct Transition {
+pub struct Transition<V: FstOutput = u64> {
     /// The byte input associated with this transition.
     pub inp: u8,
     /// The output associated with this transition.
-    pub out: Output,
+    pub out: Output<V>,
     /// The address of the node that this transition points to.
     pub addr: CompiledAddr,
 }
 
-impl Default for Transition {
+impl<V: FstOutput> Default for Transition<V> {
     #[inline]
-    fn default() -> Transition {
+    fn default() -> Transition<V> {
         Transition { inp: 0, out: Output::zero(), addr: NONE_ADDRESS }
     }
 }
 
-impl fmt::Debug for Transition {
+impl<V: FstOutput> fmt::Debug for Transition<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.out.is_zero() {
             write!(f, "{} -> {}", self.inp as char, self.addr)
         } else {
             write!(
                 f,
-                "({}, {}) -> {}",
+                "({}, {:?}) -> {}",
                 self.inp as char,
                 self.out.value(),
                 self.addr

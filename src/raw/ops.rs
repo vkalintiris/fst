@@ -2,12 +2,12 @@ use std::cmp;
 use std::collections::BinaryHeap;
 use std::iter::FromIterator;
 
-use crate::raw::Output;
+use crate::raw::{FstOutput, Output};
 use crate::stream::{IntoStreamer, Streamer};
 
 /// Permits stream operations to be hetergeneous with respect to streams.
-type BoxedStream<'f> =
-    Box<dyn for<'a> Streamer<'a, Item = (&'a [u8], Output)> + 'f>;
+type BoxedStream<'f, V> =
+    Box<dyn for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)> + 'f>;
 
 /// A value indexed by a stream.
 ///
@@ -17,11 +17,11 @@ type BoxedStream<'f> =
 /// and the value corresponds to the value associated with a particular key
 /// in that stream.
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct IndexedValue {
+pub struct IndexedValue<V: FstOutput = u64> {
     /// The index of the stream that produced this value (starting at `0`).
     pub index: usize,
     /// The value.
-    pub value: u64,
+    pub value: V,
 }
 
 /// A builder for collecting fst streams on which to perform set operations
@@ -41,14 +41,14 @@ pub struct IndexedValue {
 /// stream.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying set.
-pub struct OpBuilder<'f> {
-    streams: Vec<BoxedStream<'f>>,
+pub struct OpBuilder<'f, V: FstOutput = u64> {
+    streams: Vec<BoxedStream<'f, V>>,
 }
 
-impl<'f> OpBuilder<'f> {
+impl<'f, V: FstOutput> OpBuilder<'f, V> {
     /// Create a new set operation builder.
     #[inline]
-    pub fn new() -> OpBuilder<'f> {
+    pub fn new() -> OpBuilder<'f, V> {
         OpBuilder { streams: vec![] }
     }
 
@@ -59,10 +59,10 @@ impl<'f> OpBuilder<'f> {
     ///
     /// The stream must emit a lexicographically ordered sequence of key-value
     /// pairs.
-    pub fn add<I, S>(mut self, stream: I) -> OpBuilder<'f>
+    pub fn add<I, S>(mut self, stream: I) -> OpBuilder<'f, V>
     where
-        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
     {
         self.push(stream);
         self
@@ -74,8 +74,8 @@ impl<'f> OpBuilder<'f> {
     /// pairs.
     pub fn push<I, S>(&mut self, stream: I)
     where
-        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+        I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+        S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
     {
         self.streams.push(Box::new(stream.into_stream()));
     }
@@ -90,7 +90,7 @@ impl<'f> OpBuilder<'f> {
     /// stream, which is an integer that is auto-incremented when a stream
     /// is added to this operation (starting at `0`).
     #[inline]
-    pub fn union(self) -> Union<'f> {
+    pub fn union(self) -> Union<'f, V> {
         Union {
             heap: StreamHeap::new(self.streams),
             outs: vec![],
@@ -108,7 +108,7 @@ impl<'f> OpBuilder<'f> {
     /// stream, which is an integer that is auto-incremented when a stream
     /// is added to this operation (starting at `0`).
     #[inline]
-    pub fn intersection(self) -> Intersection<'f> {
+    pub fn intersection(self) -> Intersection<'f, V> {
         Intersection {
             heap: StreamHeap::new(self.streams),
             outs: vec![],
@@ -132,7 +132,7 @@ impl<'f> OpBuilder<'f> {
     /// of `difference`, each yielded key contains exactly one `IndexValue` with
     /// `index` set to 0.
     #[inline]
-    pub fn difference(mut self) -> Difference<'f> {
+    pub fn difference(mut self) -> Difference<'f, V> {
         let first = self.streams.swap_remove(0);
         Difference {
             set: first,
@@ -159,7 +159,7 @@ impl<'f> OpBuilder<'f> {
     /// stream, which is an integer that is auto-incremented when a stream
     /// is added to this operation (starting at `0`).
     #[inline]
-    pub fn symmetric_difference(self) -> SymmetricDifference<'f> {
+    pub fn symmetric_difference(self) -> SymmetricDifference<'f, V> {
         SymmetricDifference {
             heap: StreamHeap::new(self.streams),
             outs: vec![],
@@ -168,10 +168,10 @@ impl<'f> OpBuilder<'f> {
     }
 }
 
-impl<'f, I, S> Extend<I> for OpBuilder<'f>
+impl<'f, V: FstOutput, I, S> Extend<I> for OpBuilder<'f, V>
 where
-    I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-    S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+    I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+    S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
 {
     fn extend<T>(&mut self, it: T)
     where
@@ -183,12 +183,12 @@ where
     }
 }
 
-impl<'f, I, S> FromIterator<I> for OpBuilder<'f>
+impl<'f, V: FstOutput, I, S> FromIterator<I> for OpBuilder<'f, V>
 where
-    I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output)>,
-    S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output)>,
+    I: for<'a> IntoStreamer<'a, Into = S, Item = (&'a [u8], Output<V>)>,
+    S: 'f + for<'a> Streamer<'a, Item = (&'a [u8], Output<V>)>,
 {
-    fn from_iter<T>(it: T) -> OpBuilder<'f>
+    fn from_iter<T>(it: T) -> OpBuilder<'f, V>
     where
         T: IntoIterator<Item = I>,
     {
@@ -201,16 +201,16 @@ where
 /// A stream of set union over multiple fst streams in lexicographic order.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying map.
-pub struct Union<'f> {
-    heap: StreamHeap<'f>,
-    outs: Vec<IndexedValue>,
-    cur_slot: Option<Slot>,
+pub struct Union<'f, V: FstOutput = u64> {
+    heap: StreamHeap<'f, V>,
+    outs: Vec<IndexedValue<V>>,
+    cur_slot: Option<Slot<V>>,
 }
 
-impl<'a, 'f> Streamer<'a> for Union<'f> {
-    type Item = (&'a [u8], &'a [IndexedValue]);
+impl<'a, 'f, V: FstOutput> Streamer<'a> for Union<'f, V> {
+    type Item = (&'a [u8], &'a [IndexedValue<V>]);
 
-    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue])> {
+    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue<V>])> {
         if let Some(slot) = self.cur_slot.take() {
             self.heap.refill(slot);
         }
@@ -235,16 +235,16 @@ impl<'a, 'f> Streamer<'a> for Union<'f> {
 /// order.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
-pub struct Intersection<'f> {
-    heap: StreamHeap<'f>,
-    outs: Vec<IndexedValue>,
-    cur_slot: Option<Slot>,
+pub struct Intersection<'f, V: FstOutput = u64> {
+    heap: StreamHeap<'f, V>,
+    outs: Vec<IndexedValue<V>>,
+    cur_slot: Option<Slot<V>>,
 }
 
-impl<'a, 'f> Streamer<'a> for Intersection<'f> {
-    type Item = (&'a [u8], &'a [IndexedValue]);
+impl<'a, 'f, V: FstOutput> Streamer<'a> for Intersection<'f, V> {
+    type Item = (&'a [u8], &'a [IndexedValue<V>]);
 
-    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue])> {
+    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue<V>])> {
         if let Some(slot) = self.cur_slot.take() {
             self.heap.refill(slot);
         }
@@ -280,17 +280,17 @@ impl<'a, 'f> Streamer<'a> for Intersection<'f> {
 /// appear in any other streams.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
-pub struct Difference<'f> {
-    set: BoxedStream<'f>,
+pub struct Difference<'f, V: FstOutput = u64> {
+    set: BoxedStream<'f, V>,
     key: Vec<u8>,
-    heap: StreamHeap<'f>,
-    outs: Vec<IndexedValue>,
+    heap: StreamHeap<'f, V>,
+    outs: Vec<IndexedValue<V>>,
 }
 
-impl<'a, 'f> Streamer<'a> for Difference<'f> {
-    type Item = (&'a [u8], &'a [IndexedValue]);
+impl<'a, 'f, V: FstOutput> Streamer<'a> for Difference<'f, V> {
+    type Item = (&'a [u8], &'a [IndexedValue<V>]);
 
-    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue])> {
+    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue<V>])> {
         loop {
             match self.set.next() {
                 None => return None,
@@ -320,16 +320,16 @@ impl<'a, 'f> Streamer<'a> for Difference<'f> {
 /// lexicographic order.
 ///
 /// The `'f` lifetime parameter refers to the lifetime of the underlying fst.
-pub struct SymmetricDifference<'f> {
-    heap: StreamHeap<'f>,
-    outs: Vec<IndexedValue>,
-    cur_slot: Option<Slot>,
+pub struct SymmetricDifference<'f, V: FstOutput = u64> {
+    heap: StreamHeap<'f, V>,
+    outs: Vec<IndexedValue<V>>,
+    cur_slot: Option<Slot<V>>,
 }
 
-impl<'a, 'f> Streamer<'a> for SymmetricDifference<'f> {
-    type Item = (&'a [u8], &'a [IndexedValue]);
+impl<'a, 'f, V: FstOutput> Streamer<'a> for SymmetricDifference<'f, V> {
+    type Item = (&'a [u8], &'a [IndexedValue<V>]);
 
-    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue])> {
+    fn next(&'a mut self) -> Option<(&'a [u8], &'a [IndexedValue<V>])> {
         if let Some(slot) = self.cur_slot.take() {
             self.heap.refill(slot);
         }
@@ -359,13 +359,13 @@ impl<'a, 'f> Streamer<'a> for SymmetricDifference<'f> {
     }
 }
 
-struct StreamHeap<'f> {
-    rdrs: Vec<BoxedStream<'f>>,
-    heap: BinaryHeap<Slot>,
+struct StreamHeap<'f, V: FstOutput> {
+    rdrs: Vec<BoxedStream<'f, V>>,
+    heap: BinaryHeap<Slot<V>>,
 }
 
-impl<'f> StreamHeap<'f> {
-    fn new(streams: Vec<BoxedStream<'f>>) -> StreamHeap<'f> {
+impl<'f, V: FstOutput> StreamHeap<'f, V> {
+    fn new(streams: Vec<BoxedStream<'f, V>>) -> StreamHeap<'f, V> {
         let mut u = StreamHeap { rdrs: streams, heap: BinaryHeap::new() };
         for i in 0..u.rdrs.len() {
             u.refill(Slot::new(i));
@@ -373,7 +373,7 @@ impl<'f> StreamHeap<'f> {
         u
     }
 
-    fn pop(&mut self) -> Option<Slot> {
+    fn pop(&mut self) -> Option<Slot<V>> {
         self.heap.pop()
     }
 
@@ -381,7 +381,7 @@ impl<'f> StreamHeap<'f> {
         self.heap.peek().map(|s| s.input() == key).unwrap_or(false)
     }
 
-    fn pop_if_equal(&mut self, key: &[u8]) -> Option<Slot> {
+    fn pop_if_equal(&mut self, key: &[u8]) -> Option<Slot<V>> {
         if self.peek_is_duplicate(key) {
             self.pop()
         } else {
@@ -389,7 +389,7 @@ impl<'f> StreamHeap<'f> {
         }
     }
 
-    fn pop_if_le(&mut self, key: &[u8]) -> Option<Slot> {
+    fn pop_if_le(&mut self, key: &[u8]) -> Option<Slot<V>> {
         if self.heap.peek().map(|s| s.input() <= key).unwrap_or(false) {
             self.pop()
         } else {
@@ -401,7 +401,7 @@ impl<'f> StreamHeap<'f> {
         self.rdrs.len()
     }
 
-    fn refill(&mut self, mut slot: Slot) {
+    fn refill(&mut self, mut slot: Slot<V>) {
         if let Some((input, output)) = self.rdrs[slot.idx].next() {
             slot.set_input(input);
             slot.set_output(output);
@@ -411,14 +411,14 @@ impl<'f> StreamHeap<'f> {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct Slot {
+struct Slot<V: FstOutput = u64> {
     idx: usize,
     input: Vec<u8>,
-    output: Output,
+    output: Output<V>,
 }
 
-impl Slot {
-    fn new(rdr_idx: usize) -> Slot {
+impl<V: FstOutput> Slot<V> {
+    fn new(rdr_idx: usize) -> Slot<V> {
         Slot {
             idx: rdr_idx,
             input: Vec::with_capacity(64),
@@ -426,7 +426,7 @@ impl Slot {
         }
     }
 
-    fn indexed_value(&self) -> IndexedValue {
+    fn indexed_value(&self) -> IndexedValue<V> {
         IndexedValue { index: self.idx, value: self.output.value() }
     }
 
@@ -439,21 +439,21 @@ impl Slot {
         self.input.extend(input);
     }
 
-    fn set_output(&mut self, output: Output) {
+    fn set_output(&mut self, output: Output<V>) {
         self.output = output;
     }
 }
 
-impl PartialOrd for Slot {
-    fn partial_cmp(&self, other: &Slot) -> Option<cmp::Ordering> {
+impl<V: FstOutput> PartialOrd for Slot<V> {
+    fn partial_cmp(&self, other: &Slot<V>) -> Option<cmp::Ordering> {
         (&self.input, self.output)
             .partial_cmp(&(&other.input, other.output))
             .map(|ord| ord.reverse())
     }
 }
 
-impl Ord for Slot {
-    fn cmp(&self, other: &Slot) -> cmp::Ordering {
+impl<V: FstOutput> Ord for Slot<V> {
+    fn cmp(&self, other: &Slot<V>) -> cmp::Ordering {
         self.partial_cmp(other).unwrap()
     }
 }

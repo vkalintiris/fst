@@ -18,7 +18,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<[u8]>,
 {
-    let mut bfst = Builder::memory();
+    let bump = bumpalo::Bump::new();
+    let mut bfst = Builder::memory(&bump);
     let mut ss: Vec<Vec<u8>> =
         ss.into_iter().map(|s| s.as_ref().to_vec()).collect();
     ss.sort();

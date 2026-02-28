@@ -597,3 +597,142 @@ fn verify_err() {
         assert!(fst.verify().is_err());
     }
 }
+
+// --- Tests for generic output types (non-u64) ---
+
+#[test]
+fn typed_u8_map_roundtrip() {
+    let fst: Fst<Vec<u8>, u8> = Fst::from_iter_map_typed(vec![
+        ("abc", 10u8),
+        ("def", 20u8),
+        ("xyz", 255u8),
+    ])
+    .unwrap();
+    assert_eq!(fst.get("abc"), Some(Output::new(10u8)));
+    assert_eq!(fst.get("def"), Some(Output::new(20u8)));
+    assert_eq!(fst.get("xyz"), Some(Output::new(255u8)));
+    assert_eq!(fst.get("zzz"), None);
+    assert_eq!(fst.len(), 3);
+}
+
+#[test]
+fn typed_u16_map_roundtrip() {
+    let fst: Fst<Vec<u8>, u16> = Fst::from_iter_map_typed(vec![
+        ("abc", 1000u16),
+        ("def", 2000u16),
+        ("xyz", 65535u16),
+    ])
+    .unwrap();
+    assert_eq!(fst.get("abc"), Some(Output::new(1000u16)));
+    assert_eq!(fst.get("def"), Some(Output::new(2000u16)));
+    assert_eq!(fst.get("xyz"), Some(Output::new(65535u16)));
+    assert_eq!(fst.get("zzz"), None);
+}
+
+#[test]
+fn typed_u32_map_roundtrip() {
+    let fst: Fst<Vec<u8>, u32> = Fst::from_iter_map_typed(vec![
+        ("abc", 100_000u32),
+        ("def", 200_000u32),
+        ("xyz", 4_000_000_000u32),
+    ])
+    .unwrap();
+    assert_eq!(fst.get("abc"), Some(Output::new(100_000u32)));
+    assert_eq!(fst.get("def"), Some(Output::new(200_000u32)));
+    assert_eq!(fst.get("xyz"), Some(Output::new(4_000_000_000u32)));
+}
+
+#[test]
+fn typed_u8_stream() {
+    let fst: Fst<Vec<u8>, u8> = Fst::from_iter_map_typed(vec![
+        ("a", 1u8),
+        ("b", 2u8),
+        ("c", 3u8),
+    ])
+    .unwrap();
+    let stream = fst.stream();
+    let result = stream.into_byte_vec();
+    assert_eq!(
+        result,
+        vec![
+            (b"a".to_vec(), 1u8),
+            (b"b".to_vec(), 2u8),
+            (b"c".to_vec(), 3u8),
+        ]
+    );
+}
+
+#[test]
+fn typed_u8_get_key() {
+    let fst: Fst<Vec<u8>, u8> = Fst::from_iter_map_typed(vec![
+        ("abc", 2u8),
+        ("xyz", 3u8),
+    ])
+    .unwrap();
+    assert_eq!(fst.get_key(0u8), None);
+    assert_eq!(fst.get_key(2u8), Some(b"abc".to_vec()));
+    assert_eq!(fst.get_key(3u8), Some(b"xyz".to_vec()));
+    assert_eq!(fst.get_key(4u8), None);
+}
+
+#[test]
+fn typed_u8_new_typed_reinterpret() {
+    // Build with u64, reinterpret as u8
+    let fst_u64 = fst_map(vec![("a", 1), ("b", 2), ("c", 100)]);
+    let bytes = fst_u64.to_vec();
+    let fst_u8: Fst<Vec<u8>, u8> = Fst::new_typed(bytes).unwrap();
+    assert_eq!(fst_u8.get("a"), Some(Output::new(1u8)));
+    assert_eq!(fst_u8.get("b"), Some(Output::new(2u8)));
+    assert_eq!(fst_u8.get("c"), Some(Output::new(100u8)));
+}
+
+#[test]
+fn typed_u16_set_operations() {
+    let fst1: Fst<Vec<u8>, u16> = Fst::from_iter_map_typed(vec![
+        ("a", 1u16),
+        ("b", 2u16),
+        ("c", 3u16),
+    ])
+    .unwrap();
+    let fst2: Fst<Vec<u8>, u16> = Fst::from_iter_map_typed(vec![
+        ("b", 10u16),
+        ("c", 20u16),
+        ("d", 30u16),
+    ])
+    .unwrap();
+
+    // Union
+    let mut union = fst1.op().add(&fst2).union();
+    let mut keys = vec![];
+    while let Some((key, _)) = union.next() {
+        keys.push(String::from_utf8(key.to_vec()).unwrap());
+    }
+    assert_eq!(keys, vec!["a", "b", "c", "d"]);
+
+    // Intersection
+    let mut intersection = fst1.op().add(&fst2).intersection();
+    let mut keys = vec![];
+    while let Some((key, outs)) = intersection.next() {
+        keys.push((
+            String::from_utf8(key.to_vec()).unwrap(),
+            outs.iter().map(|iv| iv.value).collect::<Vec<u16>>(),
+        ));
+    }
+    assert_eq!(
+        keys,
+        vec![
+            ("b".to_string(), vec![2u16, 10u16]),
+            ("c".to_string(), vec![3u16, 20u16]),
+        ]
+    );
+}
+
+#[test]
+fn typed_u8_set_typed() {
+    let fst: Fst<Vec<u8>, u8> =
+        Fst::from_iter_set_typed(vec!["a", "b", "c"]).unwrap();
+    assert!(fst.contains_key("a"));
+    assert!(fst.contains_key("b"));
+    assert!(fst.contains_key("c"));
+    assert!(!fst.contains_key("d"));
+}

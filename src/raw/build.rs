@@ -10,7 +10,7 @@ use crate::raw::counting_writer::CountingWriter;
 use crate::raw::error::Error;
 use crate::raw::registry::{Registry, RegistryEntry};
 use crate::raw::{
-    CompiledAddr, Fst, FstType, Output, Transition, EMPTY_ADDRESS,
+    CompiledAddr, Fst, FstOutput, FstType, Output, Transition, EMPTY_ADDRESS,
     NONE_ADDRESS, VERSION,
 };
 // use raw::registry_minimal::{Registry, RegistryEntry};
@@ -47,7 +47,7 @@ use crate::stream::{IntoStreamer, Streamer};
 ///
 /// The algorithmic complexity of fst construction is `O(n)` where `n` is the
 /// number of elements added to the fst.
-pub struct Builder<'bump, W> {
+pub struct Builder<'bump, W, V: FstOutput = u64> {
     /// The bump allocator for all internal allocations.
     bump: &'bump Bump,
     /// The FST raw data is written directly to `wtr`.
@@ -58,13 +58,13 @@ pub struct Builder<'bump, W> {
     ///
     /// An unfinished node is a node that could potentially have a new
     /// transition added to it when a new word is added to the dictionary.
-    unfinished: UnfinishedNodes<'bump>,
+    unfinished: UnfinishedNodes<'bump, V>,
     /// A map of finished nodes.
     ///
     /// A finished node is one that has been compiled and written to `wtr`.
     /// After this point, the node is considered immutable and will never
     /// change.
-    registry: Registry<'bump>,
+    registry: Registry<'bump, V>,
     /// The last word added.
     ///
     /// This is used to enforce the invariant that words are added in sorted
@@ -82,28 +82,28 @@ pub struct Builder<'bump, W> {
 }
 
 #[derive(Debug)]
-struct UnfinishedNodes<'bump> {
+struct UnfinishedNodes<'bump, V: FstOutput = u64> {
     bump: &'bump Bump,
-    stack: BumpVec<'bump, BuilderNodeUnfinished<'bump>>,
+    stack: BumpVec<'bump, BuilderNodeUnfinished<'bump, V>>,
 }
 
 #[derive(Debug)]
-struct BuilderNodeUnfinished<'bump> {
-    node: BuilderNode<'bump>,
-    last: Option<LastTransition>,
+struct BuilderNodeUnfinished<'bump, V: FstOutput = u64> {
+    node: BuilderNode<'bump, V>,
+    last: Option<LastTransition<V>>,
 }
 
 #[derive(Debug)]
-pub struct BuilderNode<'bump> {
+pub struct BuilderNode<'bump, V: FstOutput = u64> {
     pub is_final: bool,
-    pub final_output: Output,
-    pub trans: BumpVec<'bump, Transition>,
+    pub final_output: Output<V>,
+    pub trans: BumpVec<'bump, Transition<V>>,
 }
 
 #[derive(Debug)]
-struct LastTransition {
+struct LastTransition<V: FstOutput = u64> {
     inp: u8,
-    out: Output,
+    out: Output<V>,
 }
 
 impl<'bump> Builder<'bump, Vec<u8>> {
@@ -345,8 +345,8 @@ impl<'bump, W: io::Write> Builder<'bump, W> {
     }
 }
 
-impl<'bump> UnfinishedNodes<'bump> {
-    fn new(bump: &'bump Bump) -> UnfinishedNodes<'bump> {
+impl<'bump, V: FstOutput> UnfinishedNodes<'bump, V> {
+    fn new(bump: &'bump Bump) -> UnfinishedNodes<'bump, V> {
         let mut unfinished = UnfinishedNodes {
             bump,
             stack: BumpVec::with_capacity_in(64, bump),
@@ -369,25 +369,25 @@ impl<'bump> UnfinishedNodes<'bump> {
         });
     }
 
-    fn pop_root(&mut self) -> BuilderNode<'bump> {
+    fn pop_root(&mut self) -> BuilderNode<'bump, V> {
         assert!(self.stack.len() == 1);
         assert!(self.stack[0].last.is_none());
         self.stack.pop().unwrap().node
     }
 
-    fn pop_freeze(&mut self, addr: CompiledAddr) -> BuilderNode<'bump> {
+    fn pop_freeze(&mut self, addr: CompiledAddr) -> BuilderNode<'bump, V> {
         let mut unfinished = self.stack.pop().unwrap();
         unfinished.last_compiled(addr);
         unfinished.node
     }
 
-    fn pop_empty(&mut self) -> BuilderNode<'bump> {
+    fn pop_empty(&mut self) -> BuilderNode<'bump, V> {
         let unfinished = self.stack.pop().unwrap();
         assert!(unfinished.last.is_none());
         unfinished.node
     }
 
-    fn set_root_output(&mut self, out: Output) {
+    fn set_root_output(&mut self, out: Output<V>) {
         self.stack[0].node.is_final = true;
         self.stack[0].node.final_output = out;
     }
@@ -397,7 +397,7 @@ impl<'bump> UnfinishedNodes<'bump> {
         self.stack[last].last_compiled(addr);
     }
 
-    fn add_suffix(&mut self, bs: &[u8], out: Output) {
+    fn add_suffix(&mut self, bs: &[u8], out: Output<V>) {
         if bs.is_empty() {
             return;
         }
@@ -425,8 +425,8 @@ impl<'bump> UnfinishedNodes<'bump> {
     fn find_common_prefix_and_set_output(
         &mut self,
         bs: &[u8],
-        mut out: Output,
-    ) -> (usize, Output) {
+        mut out: Output<V>,
+    ) -> (usize, Output<V>) {
         let mut i = 0;
         while i < bs.len() {
             let add_prefix = match self.stack[i].last.as_mut() {
@@ -448,7 +448,7 @@ impl<'bump> UnfinishedNodes<'bump> {
     }
 }
 
-impl<'bump> BuilderNodeUnfinished<'bump> {
+impl<'bump, V: FstOutput> BuilderNodeUnfinished<'bump, V> {
     fn last_compiled(&mut self, addr: CompiledAddr) {
         if let Some(trans) = self.last.take() {
             self.node.trans.push(Transition {
@@ -459,7 +459,7 @@ impl<'bump> BuilderNodeUnfinished<'bump> {
         }
     }
 
-    fn add_output_prefix(&mut self, prefix: Output) {
+    fn add_output_prefix(&mut self, prefix: Output<V>) {
         if self.node.is_final {
             self.node.final_output = prefix.cat(self.node.final_output);
         }
@@ -472,8 +472,8 @@ impl<'bump> BuilderNodeUnfinished<'bump> {
     }
 }
 
-impl<'bump> BuilderNode<'bump> {
-    pub fn new(bump: &'bump Bump) -> BuilderNode<'bump> {
+impl<'bump, V: FstOutput> BuilderNode<'bump, V> {
+    pub fn new(bump: &'bump Bump) -> BuilderNode<'bump, V> {
         BuilderNode {
             is_final: false,
             final_output: Output::zero(),
@@ -482,7 +482,7 @@ impl<'bump> BuilderNode<'bump> {
     }
 
     /// Reuse self's allocation, overwrite contents from source.
-    pub fn clone_from(&mut self, source: &BuilderNode<'_>) {
+    pub fn clone_from(&mut self, source: &BuilderNode<'_, V>) {
         self.is_final = source.is_final;
         self.final_output = source.final_output;
         self.trans.clear();
@@ -490,7 +490,7 @@ impl<'bump> BuilderNode<'bump> {
     }
 }
 
-impl Hash for BuilderNode<'_> {
+impl<V: FstOutput> Hash for BuilderNode<'_, V> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.is_final.hash(state);
         self.final_output.hash(state);
@@ -498,7 +498,7 @@ impl Hash for BuilderNode<'_> {
     }
 }
 
-impl PartialEq for BuilderNode<'_> {
+impl<V: FstOutput> PartialEq for BuilderNode<'_, V> {
     fn eq(&self, other: &Self) -> bool {
         self.is_final == other.is_final
             && self.final_output == other.final_output
@@ -506,4 +506,4 @@ impl PartialEq for BuilderNode<'_> {
     }
 }
 
-impl Eq for BuilderNode<'_> {}
+impl<V: FstOutput> Eq for BuilderNode<'_, V> {}
